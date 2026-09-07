@@ -328,9 +328,12 @@ def _directional_dp_from_seed(
     receiver_order: np.ndarray,
     lags: np.ndarray,
     coarse_lag_samples: np.ndarray,
+    coarse_reliable: np.ndarray,
     *,
     epsilon_samples: int,
     smooth_weight: float = 0.0,
+    residual_smooth_weight: float = 0.02,
+    coverage_reward: float = 0.15,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return best outward path metrics for every seed lag state.
 
@@ -339,10 +342,8 @@ def _directional_dp_from_seed(
     outermost receiver back toward the seed, so all seed lag states are solved
     simultaneously without enumerating seed states.
 
-    For each state, path length is the primary objective and accumulated ZNCC
-    is the secondary objective.  Therefore a path continues whenever the next
-    receiver is reachable; a shorter path cannot win merely because extending
-    through low/negative ZNCC would reduce its raw accumulated score.
+    Raw lag continuity is the only hard transition rule.  Coarse residual
+    continuity is a soft guide when both coarse samples are reliable.
     """
 
     order = np.asarray(receiver_order, dtype=int)
@@ -360,7 +361,7 @@ def _directional_dp_from_seed(
     coverage = np.zeros(nlag, dtype=int)
     score = np.full(nlag, -np.inf, dtype=float)
     coverage[outer_valid] = 1
-    score[outer_valid] = values[outer_receiver, outer_valid]
+    score[outer_valid] = values[outer_receiver, outer_valid] + coverage_reward
 
     for local_row in range(nrow - 2, -1, -1):
         receiver = int(order[local_row])
@@ -375,44 +376,37 @@ def _directional_dp_from_seed(
         outward_states = np.flatnonzero(coverage > 0)
         outward_receiver = int(order[local_row + 1])
         for current_state in np.flatnonzero(current_valid):
-            if np.isfinite(coarse_lag_samples[receiver]) and np.isfinite(coarse_lag_samples[outward_receiver]):
-                distance = np.abs(
-                    (lags[outward_states] - coarse_lag_samples[outward_receiver])
-                    - (lags[current_state] - coarse_lag_samples[receiver])
-                )
-            else:
-                distance = np.abs(lags[outward_states] - lags[current_state])
-            legal = outward_states[distance <= int(epsilon_samples)]
+            raw_jump = np.abs(lags[outward_states] - lags[current_state])
+            legal = outward_states[raw_jump <= int(epsilon_samples)]
             if legal.size == 0:
                 continue
-            legal_coverage = coverage[legal]
-            longest = legal[legal_coverage == np.max(legal_coverage)]
-            if np.isfinite(coarse_lag_samples[receiver]) and np.isfinite(coarse_lag_samples[outward_receiver]):
-                transition_distance = np.abs((lags[longest] - coarse_lag_samples[outward_receiver]) - (lags[current_state] - coarse_lag_samples[receiver]))
-            else:
-                transition_distance = np.abs(lags[longest] - lags[current_state])
-            legal_score = score[longest] - float(smooth_weight) * transition_distance
-            best = int(longest[np.argmax(legal_score)])
+            legal_raw_jump = np.abs(lags[legal] - lags[current_state])
+            penalty = float(smooth_weight) * legal_raw_jump
+            if coarse_reliable[receiver] and coarse_reliable[outward_receiver]:
+                residual_jump = np.abs(
+                    (lags[legal] - coarse_lag_samples[outward_receiver])
+                    - (lags[current_state] - coarse_lag_samples[receiver])
+                )
+                penalty += float(residual_smooth_weight) * residual_jump
+            legal_score = score[legal] - penalty
+            best = int(legal[np.argmax(legal_score)])
             best_next_coverage[current_state] = coverage[best]
-            best_next_score[current_state] = (
-                score[best] - float(smooth_weight) * float(transition_distance[np.flatnonzero(longest == best)[0]])
-            )
+            best_next_score[current_state] = float(np.max(legal_score))
             best_next_state[current_state] = best
 
         current_coverage = np.zeros(nlag, dtype=int)
         current_score = np.full(nlag, -np.inf, dtype=float)
 
-        # A valid current state always supports a length-one path.  If any next
-        # state is reachable, coverage-first scoring forces continuation.
+        # Continuing earns a small coverage reward, but cannot dominate raw
+        # waveform evidence lexicographically.
         can_continue = current_valid & (best_next_state >= 0)
-        stop_here = current_valid & ~can_continue
-        current_coverage[stop_here] = 1
-        current_score[stop_here] = values[receiver, stop_here]
-        current_coverage[can_continue] = 1 + best_next_coverage[can_continue]
-        current_score[can_continue] = (
-            values[receiver, can_continue] + best_next_score[can_continue]
-        )
-        next_state[local_row, can_continue] = best_next_state[can_continue]
+        current_coverage[current_valid] = 1
+        current_score[current_valid] = values[receiver, current_valid] + coverage_reward
+        continued_score = values[receiver] + coverage_reward + best_next_score
+        use_continue = can_continue & (continued_score > current_score)
+        current_coverage[use_continue] = 1 + best_next_coverage[use_continue]
+        current_score[use_continue] = continued_score[use_continue]
+        next_state[local_row, use_continue] = best_next_state[use_continue]
 
         coverage = current_coverage
         score = current_score
@@ -448,6 +442,8 @@ def _global_dp_segment(
     *,
     seed_receiver: int,
     coarse_lag_samples: np.ndarray,
+    coarse_reliable: np.ndarray,
+    seed_state_mask: np.ndarray | None = None,
     epsilon_samples: int,
     smooth_weight: float = 0.0,
 ) -> np.ndarray:
@@ -477,6 +473,7 @@ def _global_dp_segment(
         left_order,
         lags,
         coarse_lag_samples,
+        coarse_reliable,
         epsilon_samples=epsilon_samples,
         smooth_weight=smooth_weight,
     )
@@ -486,6 +483,7 @@ def _global_dp_segment(
         right_order,
         lags,
         coarse_lag_samples,
+        coarse_reliable,
         epsilon_samples=epsilon_samples,
         smooth_weight=smooth_weight,
     )
@@ -494,17 +492,13 @@ def _global_dp_segment(
     total_coverage = left_coverage + right_coverage - 1
     total_score = left_score + right_score - seed_value
     candidates = seed_valid & (total_coverage > 0) & np.isfinite(total_score)
+    if seed_state_mask is not None:
+        candidates &= np.asarray(seed_state_mask, dtype=bool)
     if not np.any(candidates):
         return path
 
     candidate_states = np.flatnonzero(candidates)
-    best_coverage = int(np.max(total_coverage[candidate_states]))
-    longest_states = candidate_states[
-        total_coverage[candidate_states] == best_coverage
-    ]
-    best_seed_state = int(
-        longest_states[np.argmax(total_score[longest_states])]
-    )
+    best_seed_state = int(candidate_states[np.argmax(total_score[candidate_states])])
 
     left_path = _trace_direction(left_order, best_seed_state, left_next)
     right_path = _trace_direction(right_order, best_seed_state, right_next)
@@ -540,17 +534,7 @@ def _assert_path_continuity(
         return
     left = lags[path[:-1][adjacent]]
     right = lags[path[1:][adjacent]]
-    if coarse_lag_samples is not None:
-        coarse = np.asarray(coarse_lag_samples, dtype=float)
-        rows = np.flatnonzero(adjacent)
-        use_residual = np.isfinite(coarse[rows]) & np.isfinite(coarse[rows + 1])
-        jumps = np.abs(right - left).astype(float)
-        jumps[use_residual] = np.abs(
-            (right[use_residual] - coarse[rows[use_residual] + 1])
-            - (left[use_residual] - coarse[rows[use_residual]])
-        )
-    else:
-        jumps = np.abs(right - left)
+    jumps = np.abs(right - left)
     if np.any(jumps > int(epsilon_samples)):
         location = int(np.flatnonzero(adjacent)[np.argmax(jumps)])
         raise AssertionError(
@@ -632,24 +616,11 @@ def _candidate_segments(
     previous_states = np.empty(0, dtype=int)
     for receiver in range(state_valid.shape[0]):
         states = np.flatnonzero(state_valid[receiver])
-        if (
-            coarse_lag_samples is not None
-            and receiver > 0
-            and np.isfinite(coarse_lag_samples[receiver])
-            and np.isfinite(coarse_lag_samples[receiver - 1])
-        ):
-            current_lags = lags[states] - coarse_lag_samples[receiver]
-            previous_lags = (
-                lags[previous_states] - coarse_lag_samples[receiver - 1]
-            )
-        else:
-            current_lags = lags[states]
-            previous_lags = lags[previous_states]
         connected = bool(
             states.size
             and previous_states.size
             and np.any(
-                np.abs(current_lags[:, None] - previous_lags[None, :])
+                np.abs(lags[states, None] - lags[previous_states][None, :])
                 <= int(max_jump_samples)
             )
         )
@@ -693,17 +664,7 @@ def _fixed_end_path(
         previous_states = np.flatnonzero(np.isfinite(score))
         for state in current_states:
             previous_receiver = int(rows[local_row - 1])
-            if (
-                coarse_lag_samples is not None
-                and np.isfinite(coarse_lag_samples[receiver])
-                and np.isfinite(coarse_lag_samples[previous_receiver])
-            ):
-                jumps = np.abs(
-                    (lags[previous_states] - coarse_lag_samples[previous_receiver])
-                    - (lags[state] - coarse_lag_samples[receiver])
-                )
-            else:
-                jumps = np.abs(lags[previous_states] - lags[state])
+            jumps = np.abs(lags[previous_states] - lags[state])
             legal = previous_states[jumps <= int(max_jump_samples)]
             if legal.size == 0:
                 continue
@@ -790,6 +751,7 @@ def _bridge_one_side(
     lags: np.ndarray,
     receiver_x: np.ndarray,
     coarse_lag_samples: np.ndarray | None,
+    coarse_reliable: np.ndarray,
     path_index: np.ndarray,
     direction: int,
     *,
@@ -821,7 +783,7 @@ def _bridge_one_side(
     history_lags = lags[path_index[inward]].astype(float)
     if (
         coarse_lag_samples is not None
-        and np.isfinite(coarse_lag_samples[inward]).all()
+        and coarse_reliable[inward].all()
     ):
         history_lags -= coarse_lag_samples[inward]
     slope = float(np.median(np.diff(history_lags))) if history_lags.size > 1 else 0.0
@@ -832,8 +794,8 @@ def _bridge_one_side(
         predicted = float(lags[path_index[anchor]]) + slope * step
         if (
             coarse_lag_samples is not None
-            and np.isfinite(coarse_lag_samples[anchor])
-            and np.isfinite(coarse_lag_samples[receiver])
+            and coarse_reliable[anchor]
+            and coarse_reliable[receiver]
         ):
             predicted += (
                 coarse_lag_samples[receiver] - coarse_lag_samples[anchor]
@@ -852,6 +814,7 @@ def _bridge_one_side(
                 if coarse_lag_samples is None
                 else coarse_lag_samples
             ),
+            coarse_reliable,
             epsilon_samples=max_jump_samples,
             smooth_weight=smooth_weight,
     )
@@ -1258,6 +1221,8 @@ def track_zncc(
     boundary_margin_time: float | None = None,
     raw_refine_radius_samples: int = 1,
     coarse_lag_samples: np.ndarray | None = None,
+    coarse_fallback_mask: np.ndarray | None = None,
+    coarse_peak_strength: np.ndarray | None = None,
     top_k_peaks: int = 4,
     peak_min_separation_samples: int = 2,
     coarse_soft_width_time: float = 0.05,
@@ -1304,6 +1269,8 @@ def track_zncc(
             boundary_margin_time=boundary_margin_time,
             raw_refine_radius_samples=raw_refine_radius_samples,
             coarse_lag_samples=coarse_lag_samples,
+            coarse_fallback_mask=coarse_fallback_mask,
+            coarse_peak_strength=coarse_peak_strength,
             top_k_peaks=top_k_peaks,
             peak_min_separation_samples=peak_min_separation_samples,
             coarse_soft_width_time=coarse_soft_width_time,
@@ -1442,10 +1409,21 @@ def track_zncc(
             "coarse_lag_samples must contain finite values or NaN with shape [nreceiver]."
         )
 
-    # Missing coarse data must fall back to absolute-lag continuity.  It must
-    # never be fabricated from a local high guide peak, which would turn an
-    # isolated periodic peak into an artificial residual-continuous branch.
+    fallback_coarse = (
+        np.zeros(n_receiver, dtype=bool)
+        if coarse_fallback_mask is None
+        else np.asarray(coarse_fallback_mask, dtype=bool)
+    )
+    if fallback_coarse.shape != (n_receiver,):
+        raise TrackingError("coarse_fallback_mask must have shape [nreceiver].")
+    if coarse_peak_strength is not None and np.asarray(coarse_peak_strength).shape != (n_receiver,):
+        raise TrackingError("coarse_peak_strength must have shape [nreceiver].")
+    coarse_reliable = np.isfinite(coarse) & ~fallback_coarse
+
+    # Missing or fallback coarse data is diagnostics-only.  It must never
+    # create a hard path rule or a state-score preference.
     soft_prior = np.array(coarse, copy=True)
+    candidate_prior = np.where(coarse_reliable, coarse, np.nan)
 
     # Ownership/finite validity is the only hard lag-state gate.  The enhanced
     # guide no longer deletes raw waveform evidence.
@@ -1463,7 +1441,7 @@ def track_zncc(
         lags,
         top_k=int(top_k_peaks),
         min_separation_samples=int(peak_min_separation_samples),
-        coarse_lag_samples=soft_prior,
+        coarse_lag_samples=candidate_prior,
     )
     # Enhanced/stacked correlation may reveal a ridge peak, but every accepted
     # state remains ownership-valid finite waveform ZNCC and is scored on raw.
@@ -1478,7 +1456,7 @@ def track_zncc(
         lags,
         top_k=int(top_k_peaks),
         min_separation_samples=int(peak_min_separation_samples),
-        coarse_lag_samples=soft_prior,
+        coarse_lag_samples=candidate_prior,
     )
     candidate_valid |= guide_candidates & base_valid
     candidate_count = np.count_nonzero(candidate_valid, axis=1)
@@ -1505,7 +1483,7 @@ def track_zncc(
         else float(polarity) * np.asarray(measurement, dtype=float)
     )
     width_samples = max(float(coarse_soft_width_time) / float(dt), 1.0)
-    for receiver in np.flatnonzero(np.isfinite(soft_prior)):
+    for receiver in np.flatnonzero(coarse_reliable):
         rho = (lags.astype(float) - soft_prior[receiver]) / width_samples
         penalty = np.minimum(
             float(coarse_soft_weight) * rho * rho,
@@ -1514,9 +1492,15 @@ def track_zncc(
         score_values[receiver] -= penalty
 
     component_paths: list[tuple[np.ndarray, np.ndarray]] = []
-    for segment in _candidate_segments(
-        candidate_valid, lags, epsilon_samples, soft_prior
-    ):
+    seed_center = float(coarse[seed_receiver]) if coarse_reliable[seed_receiver] else 0.0
+    seed_range = float(seed_lag_range_time) / float(dt)
+    seed_state_mask = candidate_valid[seed_receiver] & (
+        np.abs(lags.astype(float) - seed_center) <= seed_range
+    )
+    if not np.any(seed_state_mask):
+        seed_state_mask = candidate_valid[seed_receiver]
+
+    for segment in _candidate_segments(candidate_valid, lags, epsilon_samples):
         local_seed = (
             seed_receiver
             if np.any(segment == seed_receiver)
@@ -1529,6 +1513,8 @@ def track_zncc(
             segment,
             seed_receiver=local_seed,
             coarse_lag_samples=soft_prior,
+            coarse_reliable=coarse_reliable,
+            seed_state_mask=(seed_state_mask if local_seed == seed_receiver else None),
             epsilon_samples=epsilon_samples,
             smooth_weight=float(smooth_weight),
         )
@@ -1632,6 +1618,7 @@ def track_zncc(
                 lags,
                 receivers,
                 soft_prior,
+                coarse_reliable,
                 path_index,
                 direction,
                 half_width_samples=half_width_samples,
@@ -1740,6 +1727,8 @@ def track_correlation_result(
     boundary_margin_samples: int = 0,
     boundary_margin_time: float | None = None,
     raw_refine_radius_samples: int = 1,
+    coarse_fallback_mask: np.ndarray | None = None,
+    coarse_peak_strength: np.ndarray | None = None,
     top_k_peaks: int = 4,
     peak_min_separation_samples: int = 2,
     coarse_soft_width_time: float = 0.05,
@@ -1800,6 +1789,14 @@ def track_correlation_result(
         boundary_margin_time=boundary_margin_time,
         raw_refine_radius_samples=raw_refine_radius_samples,
         coarse_lag_samples=getattr(correlation_result, "coarse_lag_samples", None),
+        coarse_fallback_mask=(
+            getattr(correlation_result, "coarse_tracking_fallback_mask", None)
+            if coarse_fallback_mask is None else coarse_fallback_mask
+        ),
+        coarse_peak_strength=(
+            getattr(correlation_result, "coarse_correlation_peak", None)
+            if coarse_peak_strength is None else coarse_peak_strength
+        ),
         top_k_peaks=top_k_peaks,
         peak_min_separation_samples=peak_min_separation_samples,
         coarse_soft_width_time=coarse_soft_width_time,

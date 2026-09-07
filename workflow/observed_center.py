@@ -56,7 +56,7 @@ class ObservedCenterRecoveryResult:
 
 
 def select_observed_center_anchors(
-    fixed_mask: np.ndarray,
+    anchor_eligible: np.ndarray,
     tracking,
     *,
     correlation_threshold: float = 0.70,
@@ -65,23 +65,26 @@ def select_observed_center_anchors(
 
     if not np.isfinite(correlation_threshold):
         raise ValueError("correlation_threshold must be finite.")
-    fixed = np.asarray(fixed_mask, dtype=bool)
+    eligible = np.asarray(anchor_eligible, dtype=bool)
     success = np.asarray(tracking.success_mask, dtype=bool)
     shift = np.asarray(tracking.shift_time, dtype=float)
-    correlation = np.asarray(tracking.tracked_correlation, dtype=float)
+    strength = np.asarray(
+        getattr(tracking, "tracked_strength", np.abs(tracking.tracked_correlation)),
+        dtype=float,
+    )
     boundary = np.asarray(tracking.boundary_flag, dtype=bool)
-    if fixed.ndim != 1 or any(
-        value.shape != fixed.shape for value in (success, shift, correlation, boundary)
+    if eligible.ndim != 1 or any(
+        value.shape != eligible.shape for value in (success, shift, strength, boundary)
     ):
         raise ValueError(
-            "fixed_mask and tracking arrays must have equal one-dimensional shapes."
+            "anchor eligibility and tracking arrays must have equal one-dimensional shapes."
         )
     return (
-        fixed
+        eligible
         & success
         & np.isfinite(shift)
-        & np.isfinite(correlation)
-        & (correlation >= float(correlation_threshold))
+        & np.isfinite(strength)
+        & (strength >= float(correlation_threshold))
         & ~boundary
     )
 
@@ -181,7 +184,9 @@ def snap_observed_center(
 
 def recover_edge_observed_centers(
     theoretical_center: np.ndarray,
-    fixed_mask: np.ndarray,
+    trace_valid: np.ndarray,
+    window_valid: np.ndarray,
+    window_energy_obs: np.ndarray,
     reference_tracking: Sequence[Sequence],
     source_coordinates: np.ndarray,
     receiver_coordinates: np.ndarray,
@@ -194,15 +199,19 @@ def recover_edge_observed_centers(
     min_anchors: int = 10,
     envelope_snap_half_width_time: float = 0.040,
 ) -> ObservedCenterRecoveryResult:
-    """Recover only fixed-mask unresolved receiver runs at either edge."""
+    """Recover eligible unresolved edge runs, never internal gaps."""
 
     theoretical = np.asarray(theoretical_center, dtype=float)
-    fixed = np.asarray(fixed_mask, dtype=bool)
+    trace = np.asarray(trace_valid, dtype=bool)
+    window = np.asarray(window_valid, dtype=bool)
+    energy = np.asarray(window_energy_obs, dtype=float)
     observed = np.asarray(observed_data, dtype=float)
     sources = np.asarray(source_coordinates, dtype=float)
     receivers = np.asarray(receiver_coordinates, dtype=float)
-    if theoretical.ndim != 3 or fixed.shape != theoretical.shape:
-        raise ValueError("theoretical_center and fixed_mask must have shape [nref, ns, nr].")
+    if theoretical.ndim != 3 or any(
+        value.shape != theoretical.shape for value in (trace, window, energy)
+    ):
+        raise ValueError("theoretical and recovery eligibility arrays must have shape [nref, ns, nr].")
     nref, nshot, nreceiver = theoretical.shape
     if observed.ndim != 3 or observed.shape[:2] != (nshot, nreceiver):
         raise ValueError("observed_data must have shape [ns, nr, nt].")
@@ -226,13 +235,19 @@ def recover_edge_observed_centers(
         row: list[np.ndarray] = []
         for shot in range(nshot):
             tracking = reference_tracking[reflector][shot]
-            fixed_row = fixed[reflector, shot]
+            eligible = (
+                trace[reflector, shot]
+                & window[reflector, shot]
+                & np.isfinite(theoretical[reflector, shot])
+                & np.isfinite(energy[reflector, shot])
+                & (energy[reflector, shot] > 0.0)
+            )
             shift = np.asarray(tracking.shift_time, dtype=float)
             success = np.asarray(tracking.success_mask, dtype=bool)
             if shift.shape != (nreceiver,) or success.shape != (nreceiver,):
                 raise ValueError("tracking arrays must match the receiver count.")
             direct = (
-                fixed_row
+                eligible
                 & success
                 & np.isfinite(shift)
                 & np.isfinite(theoretical[reflector, shot])
@@ -243,7 +258,7 @@ def recover_edge_observed_centers(
             source[reflector, shot, direct] = DIRECT_TRACKING
             row.append(
                 select_observed_center_anchors(
-                    fixed_row,
+                    eligible,
                     tracking,
                     correlation_threshold=anchor_corr_threshold,
                 )
@@ -278,7 +293,14 @@ def recover_edge_observed_centers(
         for shot in range(nshot):
             anchors = np.flatnonzero(anchor_masks[reflector][shot])
             counts["direct_anchors"] += int(anchors.size)
-            unresolved = fixed[reflector, shot] & ~np.isfinite(centers[reflector, shot])
+            eligible = (
+                trace[reflector, shot]
+                & window[reflector, shot]
+                & np.isfinite(theoretical[reflector, shot])
+                & np.isfinite(energy[reflector, shot])
+                & (energy[reflector, shot] > 0.0)
+            )
+            unresolved = eligible & ~np.isfinite(centers[reflector, shot])
             if anchors.size:
                 first = int(anchors[0])
                 last = int(anchors[-1])
@@ -311,7 +333,11 @@ def recover_edge_observed_centers(
                 )
                 shift = np.asarray(reference_tracking[reflector][shot].shift_time, dtype=float)
                 correlation = np.asarray(
-                    reference_tracking[reflector][shot].tracked_correlation,
+                    getattr(
+                        reference_tracking[reflector][shot],
+                        "tracked_strength",
+                        np.abs(reference_tracking[reflector][shot].tracked_correlation),
+                    ),
                     dtype=float,
                 )
                 fit_centers = theoretical[reflector, shot, fit_indices] + shift[fit_indices]

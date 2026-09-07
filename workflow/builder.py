@@ -202,7 +202,9 @@ class OuterStageWindowBuilder:
                 tracking_gap_penalty=self.config.tracking_gap_penalty,
                 tracking_correlation_mode=self.config.tracking_correlation_mode,
                 tracking_tracker_mode=self.config.tracking_tracker_mode,
-                tracking_restart_enabled=self.config.tracking_restart_enabled,
+                # Bootstrap freezes the first observed centers.  Only the
+                # seed-connected DP and verified raw-data bridge may enter it.
+                tracking_restart_enabled=False,
                 tracking_restart_confirm_rows=self.config.tracking_restart_confirm_rows,
                 tracking_restart_min_mean_correlation=self.config.tracking_restart_min_mean_correlation,
                 tracking_restart_max_coarse_deviation_time=self.config.tracking_restart_max_coarse_deviation_time,
@@ -294,7 +296,7 @@ class OuterStageWindowBuilder:
     def _build_observed_windows(
         self,
         reference_windows: WindowResult,
-        fixed_mask: np.ndarray,
+        fixed_quality: FixedMaskResult,
         reference_tracking: tuple[tuple[TrackingResult, ...], ...],
         observed_data: np.ndarray,
         source_coordinates: np.ndarray,
@@ -308,7 +310,9 @@ class OuterStageWindowBuilder:
 
         recovery = recover_edge_observed_centers(
             reference_windows.center_time,
-            fixed_mask,
+            fixed_quality.trace_valid,
+            fixed_quality.window_valid,
+            fixed_quality.window_energy_obs,
             reference_tracking,
             source_coordinates,
             receiver_coordinates,
@@ -452,7 +456,7 @@ class OuterStageWindowBuilder:
             )
             observed_windows, observed_center_source, recovery_counts = self._build_observed_windows(
                 windows,
-                fixed_quality.fixed_mask,
+                fixed_quality,
                 reference_tracking,
                 observed_for_recovery,
                 sources,

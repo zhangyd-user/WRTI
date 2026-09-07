@@ -51,6 +51,8 @@ class ObservedCenterRecoveryTests(unittest.TestCase):
         result = recover_edge_observed_centers(
             np.zeros((1, 1, nreceiver)),
             np.ones((1, 1, nreceiver), dtype=bool),
+            np.ones((1, 1, nreceiver), dtype=bool),
+            np.ones((1, 1, nreceiver), dtype=float),
             ((tracking,),),
             np.array([[0.0, 0.0]]),
             x.reshape(1, nreceiver, 1).repeat(2, axis=2),
@@ -66,6 +68,16 @@ class ObservedCenterRecoveryTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(anchors, [True, False])
         np.testing.assert_array_equal(tracking.success_mask, [True, True])
+
+    def test_negative_raw_correlation_uses_positive_tracking_strength(self):
+        tracking = self._tracking([True], [0.1], [-0.9])
+        tracking = tracking.__class__(
+            **{**tracking.__dict__, "tracked_strength": np.array([0.9])}
+        )
+        anchors = select_observed_center_anchors(
+            np.ones(1, dtype=bool), tracking, correlation_threshold=0.7
+        )
+        np.testing.assert_array_equal(anchors, [True])
 
     def test_right_edge_quadratic_recovery(self):
         target, result = self._edge_case([True] * 30 + [False] * 10)
@@ -93,6 +105,8 @@ class ObservedCenterRecoveryTests(unittest.TestCase):
         result = recover_edge_observed_centers(
             np.zeros((1, 1, nreceiver)),
             np.ones((1, 1, nreceiver), dtype=bool),
+            np.ones((1, 1, nreceiver), dtype=bool),
+            np.ones((1, 1, nreceiver), dtype=float),
             ((tracking,),),
             np.array([[0.0, 0.0]]),
             x.reshape(1, nreceiver, 1).repeat(2, axis=2),

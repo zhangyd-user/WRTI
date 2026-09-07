@@ -527,11 +527,14 @@ class TrackingStep5Tests(unittest.TestCase):
             seed_lag_range_time=1.0,
             epsilon_time=1.0,
             dt=1.0,
-            coarse_lag_samples=np.full(6, 4.0),
+            coarse_lag_samples=np.array([0.0, 4.0, 4.0, 4.0, 4.0, 4.0]),
         )
 
         np.testing.assert_array_equal(result.path_index, np.full(6, true))
-        np.testing.assert_array_equal(result.coarse_deviation_samples, -4.0)
+        np.testing.assert_array_equal(
+            result.coarse_deviation_samples,
+            [0.0, -4.0, -4.0, -4.0, -4.0, -4.0],
+        )
 
     def test_short_continuous_false_branch_loses_to_long_true_ridge(self) -> None:
         lags = np.arange(-4, 5, dtype=int)
@@ -667,6 +670,22 @@ class TrackingStep5Tests(unittest.TestCase):
         np.testing.assert_array_equal(result.success_mask, [True, True, False, False, False, True, True, True])
         self.assertTrue(np.all(result.provenance[5:] == "PRIMARY_DP"))
 
+    def test_bootstrap_can_disable_independent_restart(self) -> None:
+        lags = np.arange(-3, 4)
+        raw = np.full((8, lags.size), np.nan)
+        raw[:2, lags.tolist().index(0)] = 0.9
+        raw[5:, lags.tolist().index(1)] = 0.9
+
+        result = track_zncc(
+            raw, lags, np.arange(8.0), 0.0, 1.0, 1.0, 1.0,
+            restart_enabled=False,
+        )
+
+        np.testing.assert_array_equal(
+            result.success_mask,
+            [True, True, False, False, False, False, False, False],
+        )
+
     def test_auto_polarity_tracks_negative_ridge_with_positive_strength(self) -> None:
         lags = np.arange(-3, 4)
         raw = np.full((5, lags.size), 0.1)
@@ -708,6 +727,45 @@ class TrackingStep5Tests(unittest.TestCase):
 
         self.assertTrue(result.success_mask.all())
         self.assertNotEqual(result.component_id[0], result.component_id[1])
+
+    def test_wrong_middle_coarse_is_only_a_soft_guide(self) -> None:
+        lags = np.arange(-150, 151, dtype=int)
+        raw = np.full((9, lags.size), -0.2)
+        raw[:, 150] = 0.9  # lag = 0
+        coarse = np.array([0, 0, 0, 100, 100, 100, 0, 0, 0], dtype=float)
+
+        result = track_zncc(
+            raw, lags, np.arange(9.0), 4.0, 20.0, 20.0, 1.0,
+            coarse_lag_samples=coarse,
+        )
+
+        np.testing.assert_array_equal(result.path_index, np.full(9, 150))
+
+    def test_fallback_coarse_does_not_bias_the_raw_path(self) -> None:
+        lags = np.arange(-20, 21, dtype=int)
+        raw = np.full((6, lags.size), -0.2)
+        raw[:, 20] = 0.9
+
+        result = track_zncc(
+            raw, lags, np.arange(6.0), 2.0, 3.0, 3.0, 1.0,
+            coarse_lag_samples=np.full(6, 15.0),
+            coarse_fallback_mask=np.ones(6, dtype=bool),
+        )
+
+        np.testing.assert_array_equal(result.path_index, np.full(6, 20))
+
+    def test_seed_range_rejects_a_stronger_far_seed_peak(self) -> None:
+        lags = np.arange(-20, 21, dtype=int)
+        raw = np.full((7, lags.size), -0.3)
+        raw[:, 20] = 0.8
+        raw[:, 35] = 0.95
+
+        result = track_zncc(
+            raw, lags, np.arange(7.0), 3.0, 2.0, 2.0, 1.0,
+            coarse_lag_samples=np.zeros(7),
+        )
+
+        np.testing.assert_array_equal(result.path_index, np.full(7, 20))
 
 
 if __name__ == "__main__":
