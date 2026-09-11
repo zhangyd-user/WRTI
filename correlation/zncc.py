@@ -34,15 +34,15 @@ class CorrelationResult:
     ``[nreceiver]`` and records geometric window validity plus a non-zero
     synthetic zero-mean energy.  Individual lag values whose observed
     energy is zero remain ``NaN`` in ``correlation``.  ``lag_valid`` is the
-    explicit per-lag state mask after relaxed reflector ownership and finite
-    waveform checks; rejected states are also stored as ``NaN``.
+    explicit per-lag state mask after reflector ownership and optional
+    envelope/fine restrictions; rejected states are also stored as ``NaN``.
 
     ``coarse_lag_*`` records the ownership-constrained, seed-directed envelope
-    ridge used as a soft Step 5 prior.  It never removes waveform states; the
-    final WRTI lag still comes from the waveform correlation matrix.
+    ridge used to define the waveform fine search.  It is diagnostic metadata
+    only: the final WRTI lag still comes from the waveform correlation matrix.
 
-    ``waveform_correlation`` is the raw waveform ZNCC before ownership gating.
-    It remains the source for final measurement,
+    ``waveform_correlation`` is the raw waveform ZNCC before the optional
+    envelope/fine lag gate.  It remains the source for final measurement,
     QC, and fallback.  ``tracking_correlation`` is an optional AGC/stacked
     guide matrix used only to identify the DP ridge.
 
@@ -320,7 +320,6 @@ def _ownership_lag_gate(
     reflector: int,
     max_lag_time: float,
     lags_time: np.ndarray,
-    guard_time: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build a reflector-identity gate from neighboring fixed centers.
 
@@ -336,8 +335,6 @@ def _ownership_lag_gate(
     if not 0 <= reflector < nref:
         raise IndexError("reflector index is out of range.")
     target = centers[reflector]
-    if not np.isfinite(guard_time) or guard_time < 0:
-        raise CorrelationError("ownership_guard_time must be finite and non-negative.")
     lower = np.full(nreceiver, -float(max_lag_time), dtype=float)
     upper = np.full(nreceiver, float(max_lag_time), dtype=float)
     finite = np.isfinite(target)
@@ -345,21 +342,11 @@ def _ownership_lag_gate(
     if reflector > 0:
         previous = centers[reflector - 1]
         finite &= np.isfinite(previous)
-        separation = target - previous
-        guard = np.minimum(float(guard_time), 0.1 * np.maximum(separation, 0.0))
-        lower = np.maximum(
-            lower,
-            0.5 * (previous + target) - target - guard,
-        )
+        lower = np.maximum(lower, 0.5 * (previous + target) - target)
     if reflector + 1 < nref:
         following = centers[reflector + 1]
         finite &= np.isfinite(following)
-        separation = following - target
-        guard = np.minimum(float(guard_time), 0.1 * np.maximum(separation, 0.0))
-        upper = np.minimum(
-            upper,
-            0.5 * (target + following) - target + guard,
-        )
+        upper = np.minimum(upper, 0.5 * (target + following) - target)
 
     lags = np.asarray(lags_time, dtype=float)
     allowed = (
@@ -697,7 +684,6 @@ def _compute_for_one_shot(
     observed_envelope: np.ndarray | None = None,
     synthetic_envelope: np.ndarray | None = None,
     ownership_center_time: np.ndarray | None = None,
-    ownership_guard_time: float = 0.0,
     fixed_side: str = "synthetic",
     tracking_enhancement_enabled: bool = True,
     tracking_agc_fraction: float = 0.25,
@@ -769,14 +755,14 @@ def _compute_for_one_shot(
         reflector,
         max_lag_samples * float(dt),
         lags_time if fixed_side == "synthetic" else -lags_time,
-        ownership_guard_time,
     )
     if fixed_side == "observed":
         # Candidate synthetic time is center - lag, so convert the
         # observed-center ownership bounds back to the public lag axis.
         ownership_min, ownership_max = -ownership_max, -ownership_min
-    # ``envelope_fine_half_width_time`` is retained for configuration/API
-    # compatibility.  Step 5 now uses that scale as a soft-prior width.
+    fine_half_width_samples = int(
+        np.ceil(float(envelope_fine_half_width_time) / float(dt))
+    )
     if (
         not np.isfinite(envelope_tracking_epsilon_time)
         or envelope_tracking_epsilon_time <= 0
@@ -994,14 +980,14 @@ def _compute_for_one_shot(
         coarse_peak[receivers] = envelope_correlation[
             receivers, coarse_path[receivers]
         ]
-    # The envelope path is a soft prior for Step 5.  It must not delete a
-    # stronger waveform ridge merely because that ridge lies outside the old
-    # coarse +/- fine-width corridor.
-    lag_valid = (
-        ownership_allowed
-        & valid[:, None]
-        & np.isfinite(waveform_correlation)
-    )
+        fine_allowed = ownership_allowed & coarse_success[:, None] & (
+            np.abs(lags_samples[None, :] - coarse_lag_samples[:, None])
+            <= fine_half_width_samples
+        )
+    else:
+        fine_allowed = ownership_allowed & valid[:, None]
+
+    lag_valid = fine_allowed & np.isfinite(waveform_correlation)
     correlation[lag_valid] = waveform_correlation[lag_valid]
 
     return CorrelationResult(
@@ -1046,7 +1032,6 @@ def compute_zncc(
     receiver_x: np.ndarray | None = None,
     source_x: float | None = None,
     ownership_center_time: np.ndarray | None = None,
-    ownership_guard_time: float = 0.0,
     fixed_side: str = "synthetic",
     tracking_enhancement_enabled: bool = True,
     tracking_agc_fraction: float = 0.25,
@@ -1101,7 +1086,6 @@ def compute_zncc(
         ownership_center_time=(
             None if ownership_centers is None else ownership_centers[:, shot, :]
         ),
-        ownership_guard_time=ownership_guard_time,
         fixed_side=fixed_side,
         tracking_enhancement_enabled=tracking_enhancement_enabled,
         tracking_agc_fraction=tracking_agc_fraction,
@@ -1127,7 +1111,6 @@ def iter_zncc(
     receiver_x: np.ndarray | None = None,
     source_x: float | None = None,
     ownership_center_time: np.ndarray | None = None,
-    ownership_guard_time: float = 0.0,
     fixed_side: str = "synthetic",
     tracking_enhancement_enabled: bool = True,
     tracking_agc_fraction: float = 0.25,
@@ -1189,7 +1172,6 @@ def iter_zncc(
                     if ownership_centers is None
                     else ownership_centers[:, int(shot), :]
                 ),
-                ownership_guard_time=ownership_guard_time,
                 fixed_side=fixed_side,
                 tracking_enhancement_enabled=tracking_enhancement_enabled,
                 tracking_agc_fraction=tracking_agc_fraction,

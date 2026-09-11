@@ -20,7 +20,6 @@ from ..reflector import (
 from ..tracking import TrackingResult
 from ..traveltime import ReflectionTraveltimeResult, compute_reflection_traveltimes
 from ..window import WindowOverlapWarning, WindowResult, build_window_result
-from ..diagnostics.plots import save_reference_center_diagnostics
 
 from .config import WRTIConfig
 from .geometry import (
@@ -146,21 +145,11 @@ class OuterStageWindowBuilder:
         boundary_flag = np.zeros((nref, ns, nr), dtype=bool)
         tracking_success = np.zeros((nref, ns, nr), dtype=bool)
         trace_valid = np.zeros((nref, ns, nr), dtype=bool)
-        dp_success = np.zeros((nref, ns, nr), dtype=bool)
-        bridge_success = np.zeros((nref, ns, nr), dtype=bool)
-        fallback_success = np.zeros((nref, ns, nr), dtype=bool)
-        candidate_count = np.zeros((nref, ns, nr), dtype=int)
         reference_tracking: list[list[TrackingResult | None]] = [
             [None for _ in range(ns)] for _ in range(nref)
         ]
         saved_correlations: dict[tuple[int, int], CorrelationResult] = {}
         selected = set(self.config.save_correlation_for)
-        selected.update(
-            (reflector, shot)
-            for shot in self.config.debug_tracking_shots
-            if 0 <= shot < ns
-            for reflector in range(nref)
-        )
         tasks = tuple(
             ShotTrackingTask(
                 shot_index=shot,
@@ -190,42 +179,6 @@ class OuterStageWindowBuilder:
                 tracking_agc_floor_ratio=self.config.tracking_agc_floor_ratio,
                 tracking_receiver_stack=self.config.tracking_receiver_stack,
                 tracking_raw_refine_radius_samples=self.config.tracking_raw_refine_radius_samples,
-                ownership_guard_time=self.config.ownership_guard_time,
-                tracking_top_k_peaks=self.config.tracking_top_k_peaks,
-                tracking_peak_min_separation_samples=self.config.tracking_peak_min_separation_samples,
-                tracking_coarse_soft_width_time=self.config.tracking_coarse_soft_width_time,
-                tracking_coarse_soft_weight=self.config.tracking_coarse_soft_weight,
-                tracking_coarse_soft_penalty_cap=self.config.tracking_coarse_soft_penalty_cap,
-                tracking_smooth_weight=self.config.tracking_smooth_weight,
-                tracking_max_residual_jump_time=self.config.tracking_max_residual_jump_time,
-                tracking_max_skip_rows=self.config.tracking_max_skip_rows,
-                tracking_gap_penalty=self.config.tracking_gap_penalty,
-                tracking_correlation_mode=self.config.tracking_correlation_mode,
-                tracking_tracker_mode=self.config.tracking_tracker_mode,
-                # Bootstrap freezes the first observed centers.  Only the
-                # seed-connected DP and verified raw-data bridge may enter it.
-                tracking_restart_enabled=False,
-                tracking_restart_confirm_rows=self.config.tracking_restart_confirm_rows,
-                tracking_restart_min_mean_correlation=self.config.tracking_restart_min_mean_correlation,
-                tracking_restart_max_coarse_deviation_time=self.config.tracking_restart_max_coarse_deviation_time,
-                local_search_half_width_time=self.config.local_search_half_width_time,
-                max_search_half_width_time=self.config.max_search_half_width_time,
-                gap_expand_time=self.config.gap_expand_time,
-                residual_history=self.config.residual_history,
-                min_peak_margin=self.config.min_peak_margin,
-                prediction_weight=self.config.prediction_weight,
-                max_gap_rows=self.config.max_gap_rows,
-                relock_confirm_rows=self.config.relock_confirm_rows,
-                restart_min_correlation=self.config.restart_min_correlation,
-                bridge_enabled=self.config.bridge_enabled,
-                bridge_half_width_time=self.config.bridge_half_width_time,
-                bridge_max_width_time=self.config.bridge_max_width_time,
-                bridge_max_receivers=self.config.bridge_max_receivers,
-                bridge_max_distance=self.config.bridge_max_distance,
-                debug_tracking_shots=self.config.debug_tracking_shots,
-                debug_tracking_reflectors=self.config.debug_tracking_reflectors,
-                save_tracking_snapshot=self.config.save_tracking_snapshot,
-                diagnostics_output_dir=self.config.diagnostics_output_dir,
             )
             for shot in range(ns)
         )
@@ -239,15 +192,7 @@ class OuterStageWindowBuilder:
             energy_obs[:, shot] = shot_result.energy_obs
             energy_syn[:, shot] = shot_result.energy_syn
             boundary_flag[:, shot] = shot_result.boundary_flag
-            tracking_success[:, shot] = (
-                shot_result.final_available
-                if self.config.misfit.fallback_use_in_misfit
-                else shot_result.tracking_success
-            )
-            dp_success[:, shot] = shot_result.dp_success
-            bridge_success[:, shot] = shot_result.bridge_success
-            fallback_success[:, shot] = shot_result.fallback_success
-            candidate_count[:, shot] = shot_result.candidate_count
+            tracking_success[:, shot] = shot_result.tracking_success
             saved_correlations.update(shot_result.correlations)
 
         if any(item is None for row in reference_tracking for item in row):
@@ -283,10 +228,6 @@ class OuterStageWindowBuilder:
                 f"R{reflector + 1}: trace={int(np.count_nonzero(after_trace))} "
                 f"window={int(np.count_nonzero(after_window))} "
                 f"tracking={int(np.count_nonzero(after_tracking))} "
-                f"dp={int(np.count_nonzero(dp_success[reflector]))} "
-                f"bridge={int(np.count_nonzero(bridge_success[reflector]))} "
-                f"fallback={int(np.count_nonzero(fallback_success[reflector]))} "
-                f"candidates_mean={float(np.mean(candidate_count[reflector])):.2f} "
                 f"energy={int(np.count_nonzero(after_energy))} "
                 f"fixed={int(np.count_nonzero(fixed_quality.fixed_mask[reflector]))}"
             )
@@ -296,7 +237,7 @@ class OuterStageWindowBuilder:
     def _build_observed_windows(
         self,
         reference_windows: WindowResult,
-        fixed_quality: FixedMaskResult,
+        fixed_mask: np.ndarray,
         reference_tracking: tuple[tuple[TrackingResult, ...], ...],
         observed_data: np.ndarray,
         source_coordinates: np.ndarray,
@@ -310,9 +251,7 @@ class OuterStageWindowBuilder:
 
         recovery = recover_edge_observed_centers(
             reference_windows.center_time,
-            fixed_quality.trace_valid,
-            fixed_quality.window_valid,
-            fixed_quality.window_energy_obs,
+            fixed_mask,
             reference_tracking,
             source_coordinates,
             receiver_coordinates,
@@ -441,39 +380,14 @@ class OuterStageWindowBuilder:
                 observed_data,
                 reference_synthetic_data,
             )
-            # Persist raw ZNCC/tracking before center recovery: a recovery
-            # exception must not erase the evidence needed to diagnose it.
-            save_reference_center_diagnostics(
-                self.config.diagnostics_output_dir or "wrti_diagnostics",
-                correlations=saved_correlations,
-                trackings=reference_tracking,
-                receiver_coordinates=receivers,
-                observed_center=windows.center_time,
-                observed_center_source=np.zeros_like(windows.center_time, dtype=int),
-                theoretical_center=windows.center_time,
-                shots=self.config.debug_tracking_shots,
-                stage="input",
-            )
             observed_windows, observed_center_source, recovery_counts = self._build_observed_windows(
                 windows,
-                fixed_quality,
+                fixed_quality.fixed_mask,
                 reference_tracking,
                 observed_for_recovery,
                 sources,
                 receivers,
             )
-            if self.config.diagnostics_output_dir:
-                save_reference_center_diagnostics(
-                    self.config.diagnostics_output_dir,
-                    correlations=saved_correlations,
-                    trackings=reference_tracking,
-                    receiver_coordinates=receivers,
-                    observed_center=observed_windows.center_time,
-                    observed_center_source=observed_center_source,
-                    theoretical_center=windows.center_time,
-                    shots=self.config.debug_tracking_shots,
-                    stage="result",
-                )
 
         state = WRTIReferenceState(
             reflectors=reflectors,

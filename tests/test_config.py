@@ -77,50 +77,6 @@ class ParallelConfigTests(unittest.TestCase):
         with self.assertRaises(WorkflowConfigError):
             WRTIConfig.from_mapping(mapping)
 
-    def test_sparse_dp_bridge_defaults_and_overrides(self) -> None:
-        config = WRTIConfig.from_mapping(_mapping())
-        self.assertEqual(config.ownership_guard_time, 0.02)
-        self.assertEqual(config.tracking_top_k_peaks, 4)
-        self.assertTrue(config.bridge_enabled)
-        self.assertEqual(config.bridge_max_receivers, 8)
-        self.assertFalse(config.misfit.fallback_use_in_misfit)
-
-        mapping = _mapping()
-        mapping["correlation"]["ownership_guard_time"] = 0.03
-        mapping["tracking"].update(
-            {
-                "top_k_peaks": 3,
-                "smooth_weight": 0.1,
-                "bridge_max_receivers": 5,
-            }
-        )
-        mapping["misfit"]["fallback_use_in_misfit"] = True
-        config = WRTIConfig.from_mapping(mapping)
-        self.assertEqual(config.ownership_guard_time, 0.03)
-        self.assertEqual(config.tracking_top_k_peaks, 3)
-        self.assertEqual(config.tracking_smooth_weight, 0.1)
-        self.assertEqual(config.bridge_max_receivers, 5)
-        self.assertTrue(config.misfit.fallback_use_in_misfit)
-
-    def test_tracking_min_correlation_is_wired_to_qc(self) -> None:
-        mapping = _mapping()
-        mapping["tracking"]["min_correlation"] = 0.55
-        config = WRTIConfig.from_mapping(mapping)
-        self.assertEqual(config.tracking_min_correlation, 0.55)
-        self.assertEqual(config.misfit.min_correlation, 0.55)
-
-    def test_debug_tracking_selection_uses_one_based_shots_and_r_names(self) -> None:
-        mapping = _mapping()
-        mapping["diagnostics"] = {
-            "debug_tracking_shots": [31, 45],
-            "debug_tracking_reflectors": ["R2", "R4"],
-            "save_tracking_snapshot": True,
-        }
-        config = WRTIConfig.from_mapping(mapping)
-        self.assertEqual(config.debug_tracking_shots, (30, 44))
-        self.assertEqual(config.debug_tracking_reflectors, (1, 3))
-        self.assertTrue(config.save_tracking_snapshot)
-
 
 if __name__ == "__main__":
     unittest.main()

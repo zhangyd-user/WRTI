@@ -120,12 +120,6 @@ class WRTIObjectiveEvaluator:
         )
         saved_correlations: dict[tuple[int, int], CorrelationResult] = {}
         saved_tracking: dict[tuple[int, int], TrackingResult] = {}
-        dp_success_count = 0
-        bridge_success_count = 0
-        fallback_success_count = 0
-        candidate_state_count = 0
-        candidate_receiver_count = 0
-        coarse_deviations: list[np.ndarray] = []
         tasks = tuple(
             ShotTrackingTask(
                 shot_index=shot,
@@ -156,39 +150,6 @@ class WRTIObjectiveEvaluator:
                 tracking_agc_floor_ratio=state.config.tracking_agc_floor_ratio,
                 tracking_receiver_stack=state.config.tracking_receiver_stack,
                 tracking_raw_refine_radius_samples=state.config.tracking_raw_refine_radius_samples,
-                ownership_guard_time=state.config.ownership_guard_time,
-                tracking_top_k_peaks=state.config.tracking_top_k_peaks,
-                tracking_peak_min_separation_samples=state.config.tracking_peak_min_separation_samples,
-                tracking_coarse_soft_width_time=state.config.tracking_coarse_soft_width_time,
-                tracking_coarse_soft_weight=state.config.tracking_coarse_soft_weight,
-                tracking_coarse_soft_penalty_cap=state.config.tracking_coarse_soft_penalty_cap,
-                tracking_smooth_weight=state.config.tracking_smooth_weight,
-                tracking_max_residual_jump_time=state.config.tracking_max_residual_jump_time,
-                tracking_max_skip_rows=state.config.tracking_max_skip_rows,
-                tracking_gap_penalty=state.config.tracking_gap_penalty,
-                tracking_correlation_mode=state.config.tracking_correlation_mode,
-                tracking_restart_enabled=state.config.tracking_restart_enabled,
-                tracking_restart_confirm_rows=state.config.tracking_restart_confirm_rows,
-                tracking_restart_min_mean_correlation=state.config.tracking_restart_min_mean_correlation,
-                tracking_restart_max_coarse_deviation_time=state.config.tracking_restart_max_coarse_deviation_time,
-                local_search_half_width_time=state.config.local_search_half_width_time,
-                max_search_half_width_time=state.config.max_search_half_width_time,
-                gap_expand_time=state.config.gap_expand_time,
-                residual_history=state.config.residual_history,
-                min_peak_margin=state.config.min_peak_margin,
-                prediction_weight=state.config.prediction_weight,
-                max_gap_rows=state.config.max_gap_rows,
-                relock_confirm_rows=state.config.relock_confirm_rows,
-                restart_min_correlation=state.config.restart_min_correlation,
-                bridge_enabled=state.config.bridge_enabled,
-                bridge_half_width_time=state.config.bridge_half_width_time,
-                bridge_max_width_time=state.config.bridge_max_width_time,
-                bridge_max_receivers=state.config.bridge_max_receivers,
-                bridge_max_distance=state.config.bridge_max_distance,
-                debug_tracking_shots=state.config.debug_tracking_shots,
-                debug_tracking_reflectors=state.config.debug_tracking_reflectors,
-                save_tracking_snapshot=state.config.save_tracking_snapshot,
-                diagnostics_output_dir=state.config.diagnostics_output_dir,
             )
             for shot in range(ns)
         )
@@ -199,25 +160,11 @@ class WRTIObjectiveEvaluator:
             energy_obs[:, shot] = shot_result.energy_obs
             energy_syn[:, shot] = shot_result.energy_syn
             boundary_flag[:, shot] = shot_result.boundary_flag
-            tracking_success[:, shot] = (
-                shot_result.final_available
-                if state.config.misfit.fallback_use_in_misfit
-                else shot_result.tracking_success
-            )
+            tracking_success[:, shot] = shot_result.tracking_success
             path_failure_mask[:, shot] = shot_result.path_failure_mask
             fallback_local_mask[:, shot] = shot_result.fallback_local_mask
             fallback_global_mask[:, shot] = shot_result.fallback_global_mask
             fallback_argmax_mask[:, shot] = shot_result.fallback_argmax_mask
-            dp_success_count += int(np.count_nonzero(shot_result.dp_success))
-            bridge_success_count += int(np.count_nonzero(shot_result.bridge_success))
-            fallback_success_count += int(np.count_nonzero(shot_result.fallback_success))
-            candidate_state_count += int(np.sum(shot_result.candidate_count))
-            candidate_receiver_count += int(np.count_nonzero(shot_result.candidate_count))
-            finite_deviation = shot_result.coarse_deviation_samples[
-                np.isfinite(shot_result.coarse_deviation_samples)
-            ]
-            if finite_deviation.size:
-                coarse_deviations.append(np.abs(finite_deviation))
             saved_correlations.update(shot_result.correlations)
             for reflector, tracking in enumerate(shot_result.tracking):
                 if (reflector, shot) in selected:
@@ -259,30 +206,17 @@ class WRTIObjectiveEvaluator:
         )
         sum_misfit = result.misfit_sum
         mean_misfit = result.mean_misfit
-        all_deviations = (
-            np.concatenate(coarse_deviations)
-            if coarse_deviations
-            else np.empty(0, dtype=float)
-        )
         self.logger.info(
             "WRTI objective evaluation: sum_misfit=%.9g mean_misfit=%.9g "
-            "fixed=%d dp_success=%d bridge_success=%d fallback_success=%d "
-            "path_failures=%d data_invalid=%d candidates_mean=%.3g "
-            "coarse_deviation_median=%.3g coarse_deviation_max=%.3g "
+            "fixed=%d path_failures=%d data_invalid=%d "
             "fallback_local=%d fallback_global=%d fallback_argmax=%d "
             "low_corr_qc=%d boundary_qc=%d "
             "mean_tracked_correlation=%.6g",
             sum_misfit,
             mean_misfit,
             current_fixed_count,
-            dp_success_count,
-            bridge_success_count,
-            fallback_success_count,
             result.path_failure_count,
             result.data_invalid_count,
-            candidate_state_count / max(candidate_receiver_count, 1),
-            float(np.median(all_deviations)) if all_deviations.size else float("nan"),
-            float(np.max(all_deviations)) if all_deviations.size else float("nan"),
             result.fallback_local_count,
             result.fallback_global_count,
             result.fallback_argmax_count,

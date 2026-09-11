@@ -6,7 +6,6 @@ import numpy as np
 
 from WRTI.correlation import CorrelationError, compute_zncc
 from WRTI.correlation.zncc import (
-    _ownership_lag_gate,
     _seeded_envelope_path,
     _tracking_local_rms_normalize,
     _tracking_local_buffers,
@@ -194,23 +193,6 @@ class ZNCCStep4Tests(unittest.TestCase):
         self.assertFalse(result.lag_valid[0, np.flatnonzero(result.lags_samples == -50)[0]])
         self.assertFalse(result.lag_valid[0, np.flatnonzero(result.lags_samples == 50)[0]])
 
-    def test_ownership_guard_relaxes_midpoint_but_is_capped(self) -> None:
-        centers = np.array([[100.0], [200.0], [300.0]])
-        lags = np.arange(-100, 101, dtype=float)
-
-        allowed, lower, upper = _ownership_lag_gate(
-            centers,
-            reflector=1,
-            max_lag_time=100.0,
-            lags_time=lags,
-            guard_time=100.0,
-        )
-
-        self.assertEqual(lower[0], -60.0)
-        self.assertEqual(upper[0], 60.0)
-        self.assertTrue(allowed[0, np.flatnonzero(lags == -50)[0]])
-        self.assertFalse(allowed[0, np.flatnonzero(lags == -61)[0]])
-
     def test_observed_centered_ownership_gate_uses_observed_centers(self) -> None:
         nt = 768
         centers = np.array([[[100.0]], [[250.0]], [[550.0]]])
@@ -245,43 +227,6 @@ class ZNCCStep4Tests(unittest.TestCase):
         self.assertEqual(result.ownership_lag_min[0], -150.0)
         self.assertEqual(result.ownership_lag_max[0], 75.0)
 
-    def test_ownership_gate_falls_back_for_missing_neighbor_centers(self) -> None:
-        nt = 768
-        theoretical = np.array([[[100.0]], [[250.0]], [[400.0]], [[550.0]]])
-        observed_centers = theoretical.copy()
-        observed_centers[0, 0, 0] = np.nan
-        observed_centers[2, 0, 0] = np.nan
-        samples = np.arange(nt, dtype=float)
-        trace = sum(
-            np.exp(-0.5 * ((samples - center) / 4.0) ** 2)
-            for center in theoretical[:, 0, 0]
-        )
-        windows = build_window_result(
-            observed_centers,
-            dt=1.0,
-            t0=0.0,
-            nt=nt,
-            half_window_time=15.0,
-            max_lag_samples=200,
-        )
-        for reflector in (1, 3):
-            result = compute_zncc(
-                trace[None, None, :],
-                trace[None, None, :],
-                windows,
-                reflector=reflector,
-                shot=0,
-                max_lag_time=200.0,
-                dt=1.0,
-                use_envelope_coarse=False,
-                fixed_side="observed",
-                ownership_center_time=theoretical,
-            )
-
-            with self.subTest(reflector=reflector):
-                self.assertTrue(result.valid[0])
-                self.assertTrue(np.any(result.lag_valid[0]))
-
     def test_envelope_coarse_and_waveform_fine_fields_are_readonly(self) -> None:
         samples = np.arange(self.nt, dtype=float)
         center = self.event_sample
@@ -307,7 +252,7 @@ class ZNCCStep4Tests(unittest.TestCase):
         self.assertFalse(result.coarse_lag_samples.flags.writeable)
         self.assertTrue(np.isfinite(result.coarse_lag_time[0]))
 
-    def test_envelope_basin_is_soft_and_waveform_search_remains_open(self) -> None:
+    def test_envelope_basin_then_waveform_fine_recovers_oscillatory_lag(self) -> None:
         dt = 0.001
         nt = 1200
         center = 0.5
@@ -338,7 +283,7 @@ class ZNCCStep4Tests(unittest.TestCase):
         self.assertAlmostEqual(result.coarse_lag_time[0], 0.015, places=6)
         peak = self._peak(result)
         self.assertEqual(peak, 15)
-        self.assertEqual(int(np.count_nonzero(result.lag_valid[0])), 399)
+        self.assertEqual(int(np.count_nonzero(result.lag_valid[0])), 81)
         tracking = track_correlation_result(
             result,
             receiver_x=np.array([0.0]),

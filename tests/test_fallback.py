@@ -156,32 +156,6 @@ class ShiftFallbackTests(unittest.TestCase):
         self.assertFalse(result.fallback_global_mask[2])
         self.assertFalse(result.fallback_argmax_mask[2])
 
-    def test_fallback_provenance_does_not_become_measurement_success(self) -> None:
-        values = np.full((7, self.lags.size), 0.1)
-        values[:, self.lags == 0] = 0.9
-        completion = complete_tracked_shift(
-            self._tracking(np.zeros(7, dtype=bool), np.full(7, np.nan)),
-            self._correlation(values),
-            safe_lag_range_time=2.0,
-        )
-
-        self.assertTrue(np.isfinite(completion.final_shift).all())
-        self.assertFalse(completion.measurement_success_mask.any())
-        self.assertTrue(completion.fallback_success_mask.all())
-        self.assertTrue(completion.final_available_mask.all())
-
-        shape = (1, 1, 7)
-        fixed = build_fixed_mask(
-            np.ones(shape, dtype=bool),
-            np.ones(shape, dtype=bool),
-            completion.measurement_success_mask[None, None, :],
-            np.ones(shape),
-            np.ones(shape),
-            np.ones(shape),
-            np.zeros(shape, dtype=bool),
-        )
-        self.assertFalse(fixed.fixed_mask.any())
-
     def test_dp_failure_with_finite_fallback_enters_objective_without_penalty(self) -> None:
         shape = (1, 1, 1)
         valid = np.ones(shape, dtype=bool)
@@ -269,18 +243,16 @@ class ShiftFallbackTests(unittest.TestCase):
             window_energy_obs=np.ones(shape),
             window_energy_syn=np.ones(shape),
             boundary_flag=np.zeros(shape, dtype=bool),
-            tracking_success=completion.final_available_mask[None, None, :],
+            tracking_success=np.isfinite(completion.final_shift)[None, None, :],
             path_failure_mask=completion.dp_failure_mask[None, None, :],
             fallback_local_mask=completion.fallback_local_mask[None, None, :],
             fallback_global_mask=completion.fallback_global_mask[None, None, :],
             fallback_argmax_mask=completion.fallback_argmax_mask[None, None, :],
             config=MisfitConfig(failure_penalty_time=10.0),
         )
-        # A confirmed raw-supported component after the one-row gap is now a
-        # measurement, rather than a permanently propagated failure.
-        self.assertEqual(result.path_failure_count, 1)
-        self.assertEqual(result.fallback_local_count, 1)
-        self.assertEqual(result.fallback_global_count, 0)
+        self.assertEqual(result.path_failure_count, 4)
+        self.assertEqual(result.fallback_local_count, 2)
+        self.assertEqual(result.fallback_global_count, 2)
         self.assertEqual(result.data_invalid_count, 0)
 
 

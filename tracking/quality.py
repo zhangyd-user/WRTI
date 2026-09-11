@@ -11,7 +11,7 @@ import numpy as np
 
 
 def path_failure_mask(tracking) -> np.ndarray:
-    """Return rows with neither a direct-DP nor bridge measurement.
+    """Return only rows for which no usable tracked lag is available.
 
     A low correlation value and a boundary flag are not failures when the DP
     returned a valid path.  The explicit ``path_index`` term keeps the
@@ -42,9 +42,7 @@ def low_correlation_qc_mask(
 ) -> np.ndarray:
     """Return low-ZNCC QC rows without changing path validity."""
 
-    correlation = np.asarray(
-        getattr(tracking, "tracked_strength", tracking.tracked_correlation), dtype=float
-    )
+    correlation = np.asarray(tracking.tracked_correlation, dtype=float)
     if min_correlation is None:
         return np.zeros(correlation.shape, dtype=bool)
     if not np.isfinite(min_correlation) or not -1.0 <= min_correlation <= 1.0:

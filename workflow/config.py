@@ -71,7 +71,6 @@ class WRTIConfig:
     max_lag_time: float
     seed_lag_range_time: float
     epsilon_time: float
-    # Compatibility name: this threshold is QC-only and never deletes a path.
     tracking_min_correlation: float | None
     boundary_margin_samples: int
     misfit: MisfitConfig
@@ -79,13 +78,10 @@ class WRTIConfig:
     wrti_workers: int = 16
     save_correlation_for: tuple[tuple[int, int], ...] = ()
     diagnostics_output_dir: str = ""
-    debug_tracking_shots: tuple[int, ...] = ()
-    debug_tracking_reflectors: tuple[int, ...] = ()
-    save_tracking_snapshot: bool = False
     log_level: str = "INFO"
     verbose: bool = False
     use_envelope_coarse: bool = True
-    # Compatibility key retained as the default coarse soft-prior width.
+    # Waveform ZNCC half-width around the selected coarse lag.
     envelope_fine_half_width_time: float = 0.04
     # Receiver-to-receiver envelope continuity radius; distinct from the
     # waveform ZNCC basin above.
@@ -95,36 +91,6 @@ class WRTIConfig:
     tracking_agc_floor_ratio: float = 0.20
     tracking_receiver_stack: bool = True
     tracking_raw_refine_radius_samples: int = 1
-    ownership_guard_time: float = 0.02
-    tracking_top_k_peaks: int = 4
-    tracking_peak_min_separation_samples: int = 2
-    tracking_coarse_soft_width_time: float = 0.05
-    tracking_coarse_soft_weight: float = 0.05
-    tracking_coarse_soft_penalty_cap: float = 0.25
-    tracking_smooth_weight: float = 0.02
-    tracking_max_residual_jump_time: float | None = None
-    tracking_max_skip_rows: int = 3
-    tracking_gap_penalty: float = 0.05
-    tracking_correlation_mode: str = "auto_polarity"
-    tracking_tracker_mode: str = "sparse_global"
-    tracking_restart_enabled: bool = True
-    tracking_restart_confirm_rows: int = 3
-    tracking_restart_min_mean_correlation: float = 0.55
-    tracking_restart_max_coarse_deviation_time: float = 0.10
-    local_search_half_width_time: float = 0.040
-    max_search_half_width_time: float = 0.080
-    gap_expand_time: float = 0.010
-    residual_history: int = 4
-    min_peak_margin: float = 0.03
-    prediction_weight: float = 0.10
-    max_gap_rows: int = 4
-    relock_confirm_rows: int = 3
-    restart_min_correlation: float = 0.60
-    bridge_enabled: bool = True
-    bridge_half_width_time: float = 0.05
-    bridge_max_width_time: float = 0.08
-    bridge_max_receivers: int = 8
-    bridge_max_distance: float | None = None
 
     def __post_init__(self) -> None:
         if self.window_type not in {"rectangular", "tukey"}:
@@ -215,76 +181,11 @@ class WRTIConfig:
             raise WorkflowConfigError(
                 "tracking.raw_refine_radius_samples must be a non-negative integer."
             )
-        for value, name in (
-            (self.ownership_guard_time, "correlation.ownership_guard_time"),
-            (self.tracking_coarse_soft_width_time, "tracking.coarse_soft_width_time"),
-            (self.tracking_coarse_soft_weight, "tracking.coarse_soft_weight"),
-            (self.tracking_coarse_soft_penalty_cap, "tracking.coarse_soft_penalty_cap"),
-            (self.tracking_smooth_weight, "tracking.smooth_weight"),
-            (self.tracking_gap_penalty, "tracking.gap_penalty"),
-            (self.tracking_restart_min_mean_correlation, "tracking.restart_min_mean_correlation"),
-            (self.tracking_restart_max_coarse_deviation_time, "tracking.restart_max_coarse_deviation_time"),
-            (self.bridge_half_width_time, "tracking.bridge_half_width_time"),
-            (self.bridge_max_width_time, "tracking.bridge_max_width_time"),
-        ):
-            if not np.isfinite(value) or value < 0:
-                raise WorkflowConfigError(f"{name} must be finite and non-negative.")
-        if self.tracking_coarse_soft_width_time == 0:
-            raise WorkflowConfigError("tracking.coarse_soft_width_time must be positive.")
-        if self.bridge_max_width_time < self.bridge_half_width_time:
-            raise WorkflowConfigError(
-                "tracking.bridge_max_width_time must be at least bridge_half_width_time."
-            )
-        if self.tracking_max_residual_jump_time is not None and (
-            not np.isfinite(self.tracking_max_residual_jump_time)
-            or self.tracking_max_residual_jump_time < 0
-        ):
-            raise WorkflowConfigError("tracking.max_residual_jump_time must be non-negative or null.")
-        if self.tracking_correlation_mode not in {"positive", "negative", "absolute", "auto_polarity"}:
-            raise WorkflowConfigError("tracking.correlation_mode must be positive, negative, absolute, or auto_polarity.")
-        if self.tracking_tracker_mode not in {"sparse_global", "local"}:
-            raise WorkflowConfigError("tracking.tracker_mode must be sparse_global or local.")
-        if not isinstance(self.tracking_restart_enabled, (bool, np.bool_)):
-            raise WorkflowConfigError("tracking.restart_enabled must be boolean.")
-        for value, name, positive in (
-            (self.tracking_top_k_peaks, "tracking.top_k_peaks", True),
-            (
-                self.tracking_peak_min_separation_samples,
-                "tracking.peak_min_separation_samples",
-                False,
-            ),
-            (self.bridge_max_receivers, "tracking.bridge_max_receivers", False),
-            (self.tracking_max_skip_rows, "tracking.max_skip_rows", False),
-            (self.tracking_restart_confirm_rows, "tracking.restart_confirm_rows", True),
-        ):
-            if (
-                isinstance(value, bool)
-                or int(value) != value
-                or int(value) < (1 if positive else 0)
-            ):
-                qualifier = "positive" if positive else "non-negative"
-                raise WorkflowConfigError(f"{name} must be a {qualifier} integer.")
-        if not isinstance(self.bridge_enabled, (bool, np.bool_)):
-            raise WorkflowConfigError("tracking.bridge_enabled must be boolean.")
-        if self.bridge_max_distance is not None and (
-            not np.isfinite(self.bridge_max_distance) or self.bridge_max_distance < 0
-        ):
-            raise WorkflowConfigError(
-                "tracking.bridge_max_distance must be finite and non-negative or null."
-            )
         for pair in self.save_correlation_for:
             if len(pair) != 2 or any(int(value) != value or int(value) < 0 for value in pair):
                 raise WorkflowConfigError(
                     "diagnostics.save_correlation_for must contain [reflector, shot] pairs."
                 )
-        for name, values in (
-            ("diagnostics.debug_tracking_shots", self.debug_tracking_shots),
-            ("diagnostics.debug_tracking_reflectors", self.debug_tracking_reflectors),
-        ):
-            if any(isinstance(value, bool) or int(value) != value or int(value) < 0 for value in values):
-                raise WorkflowConfigError(f"{name} must contain non-negative integers.")
-        if not isinstance(self.save_tracking_snapshot, (bool, np.bool_)):
-            raise WorkflowConfigError("diagnostics.save_tracking_snapshot must be boolean.")
         object.__setattr__(self, "window_type", str(self.window_type))
         if isinstance(half, tuple):
             object.__setattr__(self, "half_window_time", tuple(float(value) for value in half))
@@ -328,44 +229,11 @@ class WRTIConfig:
             "tracking_raw_refine_radius_samples",
             int(self.tracking_raw_refine_radius_samples),
         )
-        for name in (
-            "ownership_guard_time",
-            "tracking_coarse_soft_width_time",
-            "tracking_coarse_soft_weight",
-            "tracking_coarse_soft_penalty_cap",
-            "tracking_smooth_weight",
-            "tracking_gap_penalty",
-            "tracking_restart_min_mean_correlation",
-            "tracking_restart_max_coarse_deviation_time",
-            "bridge_half_width_time",
-            "bridge_max_width_time",
-        ):
-            object.__setattr__(self, name, float(getattr(self, name)))
-        object.__setattr__(self, "tracking_top_k_peaks", int(self.tracking_top_k_peaks))
-        object.__setattr__(
-            self,
-            "tracking_peak_min_separation_samples",
-            int(self.tracking_peak_min_separation_samples),
-        )
-        object.__setattr__(self, "bridge_enabled", bool(self.bridge_enabled))
-        object.__setattr__(self, "tracking_restart_enabled", bool(self.tracking_restart_enabled))
-        object.__setattr__(self, "tracking_max_skip_rows", int(self.tracking_max_skip_rows))
-        object.__setattr__(self, "tracking_restart_confirm_rows", int(self.tracking_restart_confirm_rows))
-        object.__setattr__(self, "tracking_correlation_mode", str(self.tracking_correlation_mode))
-        object.__setattr__(self, "tracking_tracker_mode", str(self.tracking_tracker_mode))
-        if self.tracking_max_residual_jump_time is not None:
-            object.__setattr__(self, "tracking_max_residual_jump_time", float(self.tracking_max_residual_jump_time))
-        object.__setattr__(self, "bridge_max_receivers", int(self.bridge_max_receivers))
-        if self.bridge_max_distance is not None:
-            object.__setattr__(self, "bridge_max_distance", float(self.bridge_max_distance))
         object.__setattr__(
             self,
             "save_correlation_for",
             tuple((int(pair[0]), int(pair[1])) for pair in self.save_correlation_for),
         )
-        object.__setattr__(self, "debug_tracking_shots", tuple(int(value) for value in self.debug_tracking_shots))
-        object.__setattr__(self, "debug_tracking_reflectors", tuple(int(value) for value in self.debug_tracking_reflectors))
-        object.__setattr__(self, "save_tracking_snapshot", bool(self.save_tracking_snapshot))
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> "WRTIConfig":
@@ -413,21 +281,6 @@ class WRTIConfig:
             raise WorkflowConfigError(
                 "diagnostics.save_correlation_for must contain [reflector, shot] pairs."
             ) from exc
-        def reflector_index(value: Any) -> int:
-            if isinstance(value, str) and value.upper().startswith("R"):
-                value = value[1:]
-            index = int(value)
-            return index - 1 if isinstance(value, str) else index
-        try:
-            debug_shots = tuple(
-                int(value) - 1 for value in diagnostics.get("debug_tracking_shots", ())
-            )
-            debug_reflectors = tuple(
-                reflector_index(value)
-                for value in diagnostics.get("debug_tracking_reflectors", ())
-            )
-        except (TypeError, ValueError) as exc:
-            raise WorkflowConfigError("diagnostics debug shot/reflector values are invalid.") from exc
 
         return cls(
             grid=GridConfig(
@@ -452,7 +305,6 @@ class WRTIConfig:
             envelope_tracking_epsilon_time=correlation.get(
                 "envelope_tracking_epsilon_time", 0.040
             ),
-            ownership_guard_time=correlation.get("ownership_guard_time", 0.02),
             epsilon_time=tracking["epsilon_time"],
             tracking_min_correlation=tracking.get("min_correlation"),
             tracking_enhancement_enabled=tracking.get("enhancement_enabled", True),
@@ -462,42 +314,6 @@ class WRTIConfig:
             tracking_raw_refine_radius_samples=tracking.get(
                 "raw_refine_radius_samples", 1
             ),
-            tracking_top_k_peaks=tracking.get("top_k_peaks", 4),
-            tracking_peak_min_separation_samples=tracking.get(
-                "peak_min_separation_samples", 2
-            ),
-            tracking_coarse_soft_width_time=tracking.get(
-                "coarse_soft_width_time",
-                correlation.get("envelope_fine_half_width_time", 0.05),
-            ),
-            tracking_coarse_soft_weight=tracking.get("coarse_soft_weight", 0.05),
-            tracking_coarse_soft_penalty_cap=tracking.get(
-                "coarse_soft_penalty_cap", 0.25
-            ),
-            tracking_smooth_weight=tracking.get("smooth_weight", 0.02),
-            tracking_max_residual_jump_time=tracking.get("max_residual_jump_time"),
-            tracking_max_skip_rows=tracking.get("max_skip_rows", 3),
-            tracking_gap_penalty=tracking.get("gap_penalty", 0.05),
-            tracking_correlation_mode=tracking.get("correlation_mode", "auto_polarity"),
-            tracking_tracker_mode=tracking.get("tracker_mode", "sparse_global"),
-            tracking_restart_enabled=tracking.get("restart_enabled", True),
-            tracking_restart_confirm_rows=tracking.get("restart_confirm_rows", 3),
-            tracking_restart_min_mean_correlation=tracking.get("restart_min_mean_correlation", 0.55),
-            tracking_restart_max_coarse_deviation_time=tracking.get("restart_max_coarse_deviation_time", 0.10),
-            local_search_half_width_time=tracking.get("local_search_half_width_time", 0.040),
-            max_search_half_width_time=tracking.get("max_search_half_width_time", 0.080),
-            gap_expand_time=tracking.get("gap_expand_time", 0.010),
-            residual_history=tracking.get("residual_history", 4),
-            min_peak_margin=tracking.get("min_peak_margin", 0.03),
-            prediction_weight=tracking.get("prediction_weight", 0.10),
-            max_gap_rows=tracking.get("max_gap_rows", 4),
-            relock_confirm_rows=tracking.get("relock_confirm_rows", 3),
-            restart_min_correlation=tracking.get("restart_min_correlation", 0.60),
-            bridge_enabled=tracking.get("bridge_enabled", True),
-            bridge_half_width_time=tracking.get("bridge_half_width_time", 0.05),
-            bridge_max_width_time=tracking.get("bridge_max_width_time", 0.08),
-            bridge_max_receivers=tracking.get("bridge_max_receivers", 8),
-            bridge_max_distance=tracking.get("bridge_max_distance"),
             boundary_margin_samples=qc.get("boundary_margin", 0),
             # ``parallel`` is the unified schema.  The old eikonal mapping is
             # accepted only as a compatibility fallback for existing callers.
@@ -508,9 +324,6 @@ class WRTIConfig:
             misfit=misfit,
             save_correlation_for=pairs,
             diagnostics_output_dir=str(diagnostics.get("output_dir", "")),
-            debug_tracking_shots=debug_shots,
-            debug_tracking_reflectors=debug_reflectors,
-            save_tracking_snapshot=diagnostics.get("save_tracking_snapshot", False),
             log_level=str(logging.get("log_level", "INFO")),
             verbose=bool(logging.get("verbose", False)),
         )

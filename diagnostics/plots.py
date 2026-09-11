@@ -19,66 +19,6 @@ from ..window import WindowResult
 from ..workflow.observed_center import DIRECT_TRACKING
 
 
-def save_reference_center_diagnostics(
-    output_dir,
-    *,
-    correlations,
-    trackings,
-    receiver_coordinates,
-    observed_center,
-    observed_center_source,
-    theoretical_center,
-    shots=(),
-    stage="result",
-):
-    """Save first-reference ZNCC/tracking/observed-center evidence by shot."""
-    import matplotlib.pyplot as plt
-
-    output = Path(output_dir)
-    output.mkdir(parents=True, exist_ok=True)
-    centers = np.asarray(observed_center, dtype=float)
-    sources = np.asarray(observed_center_source, dtype=int)
-    theoretical = np.asarray(theoretical_center, dtype=float)
-    nref, nshot, _ = centers.shape
-    selected = tuple(shots) if shots else tuple(range(nshot))
-    for shot in selected:
-        if not 0 <= shot < nshot:
-            continue
-        receiver_x = np.asarray(receiver_coordinates[shot, :, 0], dtype=float) / 1000.0
-        figure, axes = plt.subplots(2, nref, figsize=(4.3 * nref, 7.2), squeeze=False, constrained_layout=True)
-        for reflector in range(nref):
-            correlation = correlations.get((reflector, shot))
-            tracking = trackings[reflector][shot]
-            top, bottom = axes[:, reflector]
-            if correlation is not None:
-                raw = np.asarray(correlation.waveform_correlation, dtype=float)
-                lags = np.asarray(correlation.lags_time, dtype=float) * 1000.0
-                owned = np.asarray(correlation.lag_valid, dtype=bool)
-                image = top.pcolormesh(receiver_x, lags, np.where(owned, raw, np.nan).T, shading="auto", cmap="RdBu_r", vmin=-1, vmax=1)
-                top.plot(receiver_x, correlation.coarse_lag_time * 1000.0, "y:", lw=1, label="coarse")
-                top.plot(receiver_x, np.where(tracking.success_mask, tracking.shift_time * 1000.0, np.nan), "k-", lw=1.1, label="tracked")
-                top.plot(receiver_x, tracking.predicted_lag * tracking.dt * 1000.0, color="lime", ls="--", lw=.8, label="predicted")
-                top.set_title(f"Reference R{reflector + 1}: raw ZNCC / tracker")
-                top.set_ylabel("Lag (ms)")
-                if reflector == nref - 1:
-                    figure.colorbar(image, ax=top, label="ZNCC")
-            direct = sources[reflector, shot] == DIRECT_TRACKING
-            recovered = (sources[reflector, shot] > DIRECT_TRACKING) & np.isfinite(centers[reflector, shot])
-            expected = theoretical[reflector, shot] + tracking.shift_time
-            bottom.plot(receiver_x, theoretical[reflector, shot], color="0.65", ls=":", lw=1, label="theoretical center")
-            bottom.plot(receiver_x, expected, color="tab:blue", ls="--", lw=1, label="theoretical + tracked lag")
-            bottom.plot(receiver_x, centers[reflector, shot], color="0.15", lw=1.1, label="observed center")
-            bottom.scatter(receiver_x[direct], centers[reflector, shot, direct], s=8, color="tab:blue", label="direct tracking")
-            bottom.scatter(receiver_x[recovered], centers[reflector, shot, recovered], s=10, color="tab:orange", label="recovered")
-            title = "theoretical center before recovery" if stage == "input" else "first observed center"
-            bottom.set(title=f"R{reflector + 1}: {title}", xlabel="Receiver x (km)", ylabel="Time (s)")
-            if reflector == 0:
-                top.legend(fontsize=6); bottom.legend(fontsize=6)
-        figure.suptitle(f"WRTI reference bootstrap | shot {shot + 1}: ZNCC tracking → observed center", fontweight="bold")
-        figure.savefig(output / f"wrti_reference_center_{stage}_shot_{shot + 1:03d}.png", dpi=180)
-        plt.close(figure)
-
-
 def _candidate_failure_mask(tracking, boundary_policy: str) -> np.ndarray:
     """Return only true path failures; boundary policy is compatibility-only."""
 
@@ -596,11 +536,10 @@ def save_vfsa_diagnostic(
             color=color,
             s=7,
         )
-        strength = getattr(tracking, "tracked_strength", tracking.tracked_correlation)
-        quality = success & np.isfinite(strength)
+        quality = success & np.isfinite(tracking.tracked_correlation)
         quality_ax.plot(
             receiver_x,
-            np.where(quality, strength, np.nan),
+            np.where(quality, tracking.tracked_correlation, np.nan),
             color=color,
             lw=1.1,
             label=f"R{reflector + 1}",
@@ -621,7 +560,7 @@ def save_vfsa_diagnostic(
         )
     quality_ax.set_ylim(-1.05, 1.05)
     quality_ax.set_xlabel("Receiver x (km)")
-    quality_ax.set_ylabel("Tracked strength")
+    quality_ax.set_ylabel("Tracked ZNCC")
     quality_ax.set_title("Tracking quality")
     quality_ax.legend(ncol=5, fontsize=7, frameon=False)
 

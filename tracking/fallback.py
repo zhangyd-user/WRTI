@@ -20,9 +20,6 @@ class ShiftCompletionResult:
     fallback_local_mask: np.ndarray
     fallback_global_mask: np.ndarray
     fallback_argmax_mask: np.ndarray
-    measurement_success_mask: np.ndarray
-    fallback_success_mask: np.ndarray
-    final_available_mask: np.ndarray
 
 
 def complete_tracked_shift(
@@ -34,16 +31,15 @@ def complete_tracked_shift(
 ) -> ShiftCompletionResult:
     """Complete DP gaps with local/global medians or a safe ZNCC argmax.
 
-    The measurement output is never changed.  ``tracking.shift_time`` contains
-    DP plus bridge measurements; only remaining failures are filled.
+    The DP output is never changed.  ``tracking.shift_time`` is copied as the
+    initial result; only receiver rows classified as DP failures are filled.
     A local/global fill uses finite DP shifts from neighboring receivers or
     from the same reflector/shot and does not require the failed receiver to
     have its own finite waveform ZNCC.  The receiver-level validity and ZNCC
     checks apply only to the final all-failure argmax fallback, which is
     additionally restricted to the configured safe lag range.  This keeps
     genuinely invalid windows/correlations without any usable path support
-    as NaN so the objective can handle them separately.  Fallback provenance
-    remains separate and never becomes measurement success implicitly.
+    as NaN so the objective can handle them separately.
     """
 
     if not np.isfinite(safe_lag_range_time) or safe_lag_range_time < 0:
@@ -145,15 +141,10 @@ def complete_tracked_shift(
             ) * float(correlation.dt)
             fallback_argmax[receiver] = True
 
-    fallback_success = fallback_local | fallback_global | fallback_argmax
-    measurement_success = np.asarray(tracking.success_mask, dtype=bool)
     return ShiftCompletionResult(
         final_shift=final_shift,
         dp_failure_mask=dp_failure,
         fallback_local_mask=fallback_local,
         fallback_global_mask=fallback_global,
         fallback_argmax_mask=fallback_argmax,
-        measurement_success_mask=measurement_success,
-        fallback_success_mask=fallback_success,
-        final_available_mask=measurement_success | fallback_success,
     )

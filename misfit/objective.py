@@ -30,7 +30,6 @@ class MisfitConfig:
     min_window_energy: float | None = None
     candidate_boundary_policy: str = "penalty"
     reflector_weights: Sequence[float] | None = None
-    fallback_use_in_misfit: bool = False
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.failure_penalty_time) or self.failure_penalty_time < 0:
@@ -56,8 +55,6 @@ class MisfitConfig:
             raise MisfitError(
                 "candidate_boundary_policy must be 'penalty' or 'use_shift'."
             )
-        if not isinstance(self.fallback_use_in_misfit, (bool, np.bool_)):
-            raise MisfitError("fallback_use_in_misfit must be boolean.")
         weights = self.reflector_weights
         if weights is not None:
             values = tuple(float(value) for value in weights)
@@ -79,11 +76,8 @@ class MisfitConfig:
         root = dict(mapping)
         qc = root.get("qc", {})
         misfit = root.get("misfit", {})
-        tracking = root.get("tracking", {})
-        if not all(isinstance(value, Mapping) for value in (qc, misfit, tracking)):
-            raise MisfitError(
-                "qc, tracking, and misfit configuration sections must be mappings."
-            )
+        if not isinstance(qc, Mapping) or not isinstance(misfit, Mapping):
+            raise MisfitError("qc and misfit configuration sections must be mappings.")
         penalty = qc.get("failure_penalty_time", root.get("failure_penalty_time"))
         if penalty is None:
             raise MisfitError(
@@ -99,10 +93,7 @@ class MisfitConfig:
         )
         return cls(
             failure_penalty_time=float(penalty),
-            min_correlation=qc.get(
-                "min_correlation",
-                tracking.get("min_correlation", root.get("min_correlation")),
-            ),
+            min_correlation=qc.get("min_correlation", root.get("min_correlation")),
             exclude_search_boundary=qc.get(
                 "exclude_search_boundary",
                 root.get("exclude_search_boundary", False),
@@ -117,10 +108,6 @@ class MisfitConfig:
             ),
             candidate_boundary_policy=boundary_policy,
             reflector_weights=weights,
-            fallback_use_in_misfit=misfit.get(
-                "fallback_use_in_misfit",
-                root.get("fallback_use_in_misfit", False),
-            ),
         )
 
     @classmethod
@@ -353,9 +340,9 @@ def compute_vfsa_misfit(
     """Evaluate the fixed-mask sum traveltime-square objective.
 
     The mask is read once from ``fixed_mask`` and is never altered using
-    candidate quality.  ``tracking_success`` explicitly controls whether a
-    DP/bridge measurement (or an opted-in fallback) is eligible.  A finite
-    fallback with ``tracking_success=False`` receives the failure penalty.
+    candidate quality.  ``path_failure_mask`` is a DP diagnostic and does not
+    make a finite fallback shift invalid.  Only a non-finite final shift
+    inside the fixed mask receives the configured ``failure_penalty_time``.
     The returned optimization objective is ``0.5 * sum(fixed_residual**2)``;
     ``N_fixed`` is used only for the optional mean diagnostic.
     """
@@ -379,8 +366,8 @@ def compute_vfsa_misfit(
         )
 
     weights = config.weights_for(reference_mask.shape[0])
-    # ``success`` is explicit measurement eligibility.  The workflow defaults
-    # it to DP/bridge success and opts fallback in only by configuration.
+    # ``success`` describes whether a finite final shift (possibly supplied
+    # by fallback) is available.  DP failures are tracked independently.
     data_invalid = (~success) | ~np.isfinite(candidate_shift)
     data_invalid_on_fixed = reference_mask & data_invalid
     if path_failure_mask is None:
