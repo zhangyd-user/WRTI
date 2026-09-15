@@ -263,6 +263,7 @@ def _directional_dp_from_seed(
     score[outer_valid] = score_values[outer_receiver, outer_valid]
     for local_row in range(nrow - 2, -1, -1):
         receiver = int(order[local_row])
+        outward_receiver = int(order[local_row + 1])
         current_valid = row_valid[receiver]
 
         best_next_coverage = np.zeros(nlag, dtype=int)
@@ -284,7 +285,14 @@ def _directional_dp_from_seed(
 
             candidate_coverage = coverage[outward_index]
             candidate_score = score[outward_index]
-            usable = candidate_coverage > 0
+            # Hard polarity constraint:
+            # one continuous reflector ridge must remain on the same ZNCC polarity.
+            current_values = values[receiver, current_index]
+            outward_values = values[outward_receiver, outward_index]
+
+            same_polarity = (current_values * outward_values) > 0.0
+
+            usable = (candidate_coverage > 0) & same_polarity
             if not np.any(usable):
                 continue
 
@@ -391,7 +399,7 @@ def _global_dp_segment(
         epsilon_samples=epsilon_samples,
     )
 
-    seed_value = values[seed_receiver]
+    seed_value = np.abs(values[seed_receiver])
     total_coverage = left_coverage + right_coverage - 1
     total_score = left_score + right_score - seed_value
     candidates = seed_valid & (total_coverage > 0) & np.isfinite(total_score)
