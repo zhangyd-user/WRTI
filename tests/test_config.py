@@ -77,6 +77,20 @@ class ParallelConfigTests(unittest.TestCase):
         with self.assertRaises(WorkflowConfigError):
             WRTIConfig.from_mapping(mapping)
 
+    def test_quality_audit_settings_are_read(self) -> None:
+        mapping = _mapping()
+        mapping["quality_audit"] = {
+            "early_receiver_count": 12,
+            "normal_min_side_coverage": 0.92,
+        }
+        config = WRTIConfig.from_mapping(mapping)
+        self.assertEqual(config.quality_audit.early_receiver_count, 12)
+        self.assertEqual(config.quality_audit.normal_min_side_coverage, 0.92)
+
+        mapping["quality_audit"]["early_min_coverage"] = 1.5
+        with self.assertRaises(WorkflowConfigError):
+            WRTIConfig.from_mapping(mapping)
+
 
 if __name__ == "__main__":
     unittest.main()

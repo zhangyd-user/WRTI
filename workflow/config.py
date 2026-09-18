@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 
 from ..misfit import MisfitConfig, MisfitError
+from ..tracking.quality_control import QualityAuditConfig
 
 
 class WorkflowConfigError(ValueError):
@@ -91,6 +92,33 @@ class WRTIConfig:
     tracking_agc_floor_ratio: float = 0.20
     tracking_receiver_stack: bool = True
     tracking_raw_refine_radius_samples: int = 1
+    flat_tracking_slope_penalty: float = 0.10
+    flat_tracking_refine_radius_samples: int = 3
+    flat_tracking_method: str = "dense_envelope_dp"
+    flat_candidate_min_distance_time: float = 0.015
+    flat_candidate_min_prominence: float = 0.05
+    flat_max_candidates_per_trace: int = 64
+    flat_coherence_half_window_time: float = 0.040
+    flat_min_neighbor_zncc: float = 0.50
+    flat_hard_neighbor_zncc_gate: bool = False
+    flat_max_residual_slope_ms_per_100m: float = 150.0
+    flat_prediction_soft_scale_time: float = 0.010
+    flat_prediction_penalty_weight: float = 0.20
+    flat_max_prediction_error_time: float = 0.050
+    flat_max_active_states: int = 2000
+    flat_ownership_enabled: bool = True
+    flat_ownership_overlap_fraction: float = 0.10
+    flat_ownership_edge_fraction: float = 0.60
+    flat_ownership_escape_enabled: bool = False
+    flat_ownership_escape_min_neighbor_similarity: float = 0.85
+    flat_ownership_escape_max_prediction_error_time: float = 0.015
+    flat_ownership_escape_extra_gap_fraction: float = 0.20
+    flat_ownership_escape_max_extra_time: float = 0.120
+    flat_seed_snap_enabled: bool = True
+    flat_seed_snap_half_width_time: float = 0.030
+    flat_compute_legacy_dense_diagnostic: bool = False
+    flat_legacy_dense_diagnostic_shots: tuple[int, ...] = ()
+    quality_audit: QualityAuditConfig = field(default_factory=QualityAuditConfig)
 
     def __post_init__(self) -> None:
         if self.window_type not in {"rectangular", "tukey"}:
@@ -164,6 +192,52 @@ class WRTIConfig:
             )
         if not isinstance(self.tracking_enhancement_enabled, (bool, np.bool_)):
             raise WorkflowConfigError("tracking.enhancement_enabled must be boolean.")
+        if not np.isfinite(self.flat_tracking_slope_penalty) or self.flat_tracking_slope_penalty < 0:
+            raise WorkflowConfigError("bootstrap_tracking.slope_penalty must be finite and non-negative.")
+        if (
+            isinstance(self.flat_tracking_refine_radius_samples, bool)
+            or int(self.flat_tracking_refine_radius_samples) != self.flat_tracking_refine_radius_samples
+            or self.flat_tracking_refine_radius_samples < 0
+        ):
+            raise WorkflowConfigError("bootstrap_tracking.refine_radius_samples must be a non-negative integer.")
+        if self.flat_tracking_method not in {"dense_envelope_dp", "sparse_event_dp"}:
+            raise WorkflowConfigError("bootstrap_tracking.method is invalid.")
+        for value, name in (
+            (self.flat_candidate_min_distance_time, "candidate_min_distance_time"),
+            (self.flat_candidate_min_prominence, "candidate_min_prominence"),
+            (self.flat_coherence_half_window_time, "coherence_half_window_time"),
+            (self.flat_max_residual_slope_ms_per_100m, "max_residual_slope_ms_per_100m"),
+            (self.flat_max_prediction_error_time, "max_prediction_error_time"),
+            (self.flat_prediction_soft_scale_time, "prediction_soft_scale_time"),
+            (self.flat_prediction_penalty_weight, "prediction_penalty_weight"),
+            (self.flat_ownership_overlap_fraction, "ownership_overlap_fraction"),
+            (self.flat_ownership_edge_fraction, "ownership_edge_fraction"),
+            (self.flat_ownership_escape_min_neighbor_similarity, "ownership_escape.min_neighbor_similarity"),
+            (self.flat_ownership_escape_max_prediction_error_time, "ownership_escape.max_prediction_error_time"),
+            (self.flat_ownership_escape_extra_gap_fraction, "ownership_escape.extra_gap_fraction"),
+            (self.flat_ownership_escape_max_extra_time, "ownership_escape.max_extra_time"),
+            (self.flat_seed_snap_half_width_time, "seed_snap_half_width_time"),
+        ):
+            if not np.isfinite(value) or value < 0:
+                raise WorkflowConfigError(f"bootstrap_tracking.{name} must be finite and non-negative.")
+        if not np.isfinite(self.flat_min_neighbor_zncc) or not -1 <= self.flat_min_neighbor_zncc <= 1:
+            raise WorkflowConfigError("bootstrap_tracking.min_neighbor_zncc must be in [-1, 1].")
+        if self.flat_prediction_soft_scale_time <= 0:
+            raise WorkflowConfigError("bootstrap_tracking.prediction_soft_scale_time must be positive.")
+        for value, name in (
+            (self.flat_max_candidates_per_trace, "max_candidates_per_trace"),
+            (self.flat_max_active_states, "max_active_states"),
+        ):
+            if isinstance(value, bool) or int(value) != value or value < (0 if name == "max_candidates_per_trace" else 1):
+                raise WorkflowConfigError(f"bootstrap_tracking.{name} must be a non-negative integer.")
+        if (not isinstance(self.flat_hard_neighbor_zncc_gate, (bool, np.bool_))
+                or not isinstance(self.flat_ownership_enabled, (bool, np.bool_))
+                or not isinstance(self.flat_seed_snap_enabled, (bool, np.bool_))
+                or not isinstance(self.flat_ownership_escape_enabled, (bool, np.bool_))
+                or not isinstance(self.flat_compute_legacy_dense_diagnostic, (bool, np.bool_))):
+            raise WorkflowConfigError("bootstrap_tracking ownership/ZNCC switches must be boolean.")
+        if any(isinstance(shot, bool) or int(shot) != shot or shot < 1 for shot in self.flat_legacy_dense_diagnostic_shots):
+            raise WorkflowConfigError("bootstrap_tracking.legacy_dense_diagnostic_shots uses positive 1-based shot numbers.")
         if (
             not np.isfinite(self.tracking_agc_fraction)
             or not 0 < self.tracking_agc_fraction <= 1
@@ -223,6 +297,29 @@ class WRTIConfig:
         object.__setattr__(
             self, "tracking_agc_floor_ratio", float(self.tracking_agc_floor_ratio)
         )
+        object.__setattr__(self, "flat_tracking_slope_penalty", float(self.flat_tracking_slope_penalty))
+        object.__setattr__(self, "flat_tracking_refine_radius_samples", int(self.flat_tracking_refine_radius_samples))
+        object.__setattr__(self, "flat_tracking_method", str(self.flat_tracking_method))
+        for name in (
+            "flat_candidate_min_distance_time", "flat_candidate_min_prominence",
+            "flat_coherence_half_window_time", "flat_min_neighbor_zncc",
+            "flat_max_residual_slope_ms_per_100m", "flat_max_prediction_error_time",
+            "flat_prediction_soft_scale_time", "flat_prediction_penalty_weight",
+            "flat_ownership_overlap_fraction", "flat_ownership_edge_fraction",
+            "flat_ownership_escape_min_neighbor_similarity",
+            "flat_ownership_escape_max_prediction_error_time",
+            "flat_ownership_escape_extra_gap_fraction", "flat_ownership_escape_max_extra_time",
+            "flat_seed_snap_half_width_time",
+        ):
+            object.__setattr__(self, name, float(getattr(self, name)))
+        object.__setattr__(self, "flat_max_candidates_per_trace", int(self.flat_max_candidates_per_trace))
+        object.__setattr__(self, "flat_max_active_states", int(self.flat_max_active_states))
+        object.__setattr__(self, "flat_hard_neighbor_zncc_gate", bool(self.flat_hard_neighbor_zncc_gate))
+        object.__setattr__(self, "flat_ownership_enabled", bool(self.flat_ownership_enabled))
+        object.__setattr__(self, "flat_ownership_escape_enabled", bool(self.flat_ownership_escape_enabled))
+        object.__setattr__(self, "flat_seed_snap_enabled", bool(self.flat_seed_snap_enabled))
+        object.__setattr__(self, "flat_compute_legacy_dense_diagnostic", bool(self.flat_compute_legacy_dense_diagnostic))
+        object.__setattr__(self, "flat_legacy_dense_diagnostic_shots", tuple(int(shot) for shot in self.flat_legacy_dense_diagnostic_shots))
         object.__setattr__(self, "tracking_receiver_stack", bool(self.tracking_receiver_stack))
         object.__setattr__(
             self,
@@ -245,6 +342,15 @@ class WRTIConfig:
         window = root["window"]
         correlation = root["correlation"]
         tracking = root["tracking"]
+        bootstrap_tracking = root.get("bootstrap_tracking", {})
+        if not isinstance(bootstrap_tracking, Mapping):
+            raise WorkflowConfigError("bootstrap_tracking must be a mapping.")
+        ownership_escape = bootstrap_tracking.get("ownership_escape", {})
+        if not isinstance(ownership_escape, Mapping):
+            raise WorkflowConfigError("bootstrap_tracking.ownership_escape must be a mapping.")
+        quality_audit = root.get("quality_audit", {})
+        if not isinstance(quality_audit, Mapping):
+            raise WorkflowConfigError("quality_audit must be a mapping.")
         qc = root["qc"]
         eikonal = root.get("eikonal", {})
         parallel = root.get("parallel", {})
@@ -271,6 +377,10 @@ class WRTIConfig:
             misfit = MisfitConfig.from_mapping(root)
         except MisfitError as exc:
             raise WorkflowConfigError(str(exc)) from exc
+        try:
+            audit_config = QualityAuditConfig(**quality_audit)
+        except (TypeError, ValueError) as exc:
+            raise WorkflowConfigError(f"invalid quality_audit configuration: {exc}") from exc
 
         pairs = diagnostics.get("save_correlation_for", ())
         if pairs is None:
@@ -314,6 +424,35 @@ class WRTIConfig:
             tracking_raw_refine_radius_samples=tracking.get(
                 "raw_refine_radius_samples", 1
             ),
+            flat_tracking_slope_penalty=bootstrap_tracking.get("slope_penalty", 0.10),
+            flat_tracking_refine_radius_samples=bootstrap_tracking.get(
+                "refine_radius_samples", 3
+            ),
+            flat_tracking_method=bootstrap_tracking.get("method", "dense_envelope_dp"),
+            flat_candidate_min_distance_time=bootstrap_tracking.get("candidate_min_distance_time", 0.015),
+            flat_candidate_min_prominence=bootstrap_tracking.get("candidate_min_prominence", 0.05),
+            flat_max_candidates_per_trace=bootstrap_tracking.get("max_candidates_per_trace", 64),
+            flat_coherence_half_window_time=bootstrap_tracking.get("coherence_half_window_time", 0.040),
+            flat_min_neighbor_zncc=bootstrap_tracking.get("min_neighbor_zncc", 0.50),
+            flat_hard_neighbor_zncc_gate=bootstrap_tracking.get("hard_neighbor_zncc_gate", False),
+            flat_max_residual_slope_ms_per_100m=bootstrap_tracking.get("max_residual_slope_ms_per_100m", 150.0),
+            flat_prediction_soft_scale_time=bootstrap_tracking.get("prediction_soft_scale_time", 0.010),
+            flat_prediction_penalty_weight=bootstrap_tracking.get("prediction_penalty_weight", 0.20),
+            flat_max_prediction_error_time=bootstrap_tracking.get("max_prediction_error_time", 0.050),
+            flat_max_active_states=bootstrap_tracking.get("max_active_states", 2000),
+            flat_ownership_enabled=bootstrap_tracking.get("ownership_enabled", True),
+            flat_ownership_overlap_fraction=bootstrap_tracking.get("ownership_overlap_fraction", 0.10),
+            flat_ownership_edge_fraction=bootstrap_tracking.get("ownership_edge_fraction", 0.60),
+            flat_ownership_escape_enabled=ownership_escape.get("enabled", False),
+            flat_ownership_escape_min_neighbor_similarity=ownership_escape.get("min_neighbor_similarity", 0.85),
+            flat_ownership_escape_max_prediction_error_time=ownership_escape.get("max_prediction_error_time", 0.015),
+            flat_ownership_escape_extra_gap_fraction=ownership_escape.get("extra_gap_fraction", 0.20),
+            flat_ownership_escape_max_extra_time=ownership_escape.get("max_extra_time", 0.120),
+            flat_seed_snap_enabled=bootstrap_tracking.get("seed_snap_enabled", True),
+            flat_seed_snap_half_width_time=bootstrap_tracking.get("seed_snap_half_width_time", 0.030),
+            flat_compute_legacy_dense_diagnostic=bootstrap_tracking.get("compute_legacy_dense_diagnostic", False),
+            flat_legacy_dense_diagnostic_shots=tuple(bootstrap_tracking.get("legacy_dense_diagnostic_shots", ())),
+            quality_audit=audit_config,
             boundary_margin_samples=qc.get("boundary_margin", 0),
             # ``parallel`` is the unified schema.  The old eikonal mapping is
             # accepted only as a compatibility fallback for existing callers.

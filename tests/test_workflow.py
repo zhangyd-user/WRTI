@@ -222,8 +222,8 @@ class WorkflowSmokeTests(unittest.TestCase):
         ).build(
             np.full((8, 8), 2.0),
             [Reflector(0, np.array([1.0, 2.0]), np.array([2.0, 2.0]))],
-            np.array([[10.0, 0.0]]),
-            np.array([[[8.0, 0.0], [10.0, 0.0], [12.0, 0.0]]]),
+            np.array([[2.0, 0.0]]),
+            np.array([[[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]]]),
             dt=1.0,
             t0=0.0,
             nt=64,

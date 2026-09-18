@@ -42,6 +42,8 @@ class WRTIReferenceState:
     config: WRTIConfig
     source_coordinates: np.ndarray
     receiver_coordinates: np.ndarray
+    same_x_control_time: np.ndarray | None = None
+    same_x_reflector_depth: np.ndarray | None = None
     reference_qc: FixedMaskResult | None = None
     reference_tracking: tuple[tuple[TrackingResult, ...], ...] | None = None
     reference_shift_time: np.ndarray | None = None
@@ -83,6 +85,19 @@ class WRTIReferenceState:
             raise ReferenceStateError("receiver_coordinates must have shape [ns, nr, 2].")
         if not np.isfinite(source).all() or not np.isfinite(receiver).all():
             raise ReferenceStateError("stored geometry must be finite.")
+        same_x_shape = (traveltime.shape[0], traveltime.shape[1])
+        same_x_time = None if self.same_x_control_time is None else np.asarray(
+            self.same_x_control_time, dtype=float
+        )
+        same_x_depth = None if self.same_x_reflector_depth is None else np.asarray(
+            self.same_x_reflector_depth, dtype=float
+        )
+        for name, value in {
+            "same_x_control_time": same_x_time,
+            "same_x_reflector_depth": same_x_depth,
+        }.items():
+            if value is not None and (value.shape != same_x_shape or not np.isfinite(value).all()):
+                raise ReferenceStateError(f"{name} must be finite with shape {same_x_shape}.")
 
         stored_indices = []
         for indices in self.reflector_grid_indices:
@@ -135,6 +150,8 @@ class WRTIReferenceState:
         object.__setattr__(self, "observed_center_source", _readonly(observed_source, int))
         object.__setattr__(self, "source_coordinates", _readonly(source, float))
         object.__setattr__(self, "receiver_coordinates", _readonly(receiver, float))
+        object.__setattr__(self, "same_x_control_time", None if same_x_time is None else _readonly(same_x_time, float))
+        object.__setattr__(self, "same_x_reflector_depth", None if same_x_depth is None else _readonly(same_x_depth, float))
         object.__setattr__(
             self,
             "reference_correlations",

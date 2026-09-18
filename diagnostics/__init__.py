@@ -11,6 +11,12 @@ from .plots import (
     save_vfsa_diagnostic,
     save_vfsa_diagnostics,
 )
+from .tobs_bootstrap import (
+    save_ownership_sparse_dp,
+    save_same_x_control_test,
+    save_sparse_event_dp_qc,
+    save_tobs_bootstrap_diagnostic,
+)
 
 __all__ = [
     "WarpDiagnosticError",
@@ -22,5 +28,9 @@ __all__ = [
     "plot_warped_synthetic_comparison",
     "save_vfsa_diagnostic",
     "save_vfsa_diagnostics",
+    "save_tobs_bootstrap_diagnostic",
+    "save_ownership_sparse_dp",
+    "save_same_x_control_test",
+    "save_sparse_event_dp_qc",
     "warp_synthetic_by_shift",
 ]

@@ -40,6 +40,50 @@ class WorkflowBuildError(RuntimeError):
     """Raised when an outer reference state cannot be constructed."""
 
 
+def compute_same_x_control_time(
+    velocity,
+    x_axis,
+    z_axis,
+    reflector_grid_indices,
+    source_coordinate,
+):
+    """Return vertical two-way time and reflector depth at the source x."""
+
+    velocity = np.asarray(velocity, dtype=float)
+    x_axis = np.asarray(x_axis, dtype=float)
+    z_axis = np.asarray(z_axis, dtype=float)
+    points = np.asarray(reflector_grid_indices, dtype=int)
+    source = np.asarray(source_coordinate, dtype=float)
+    if velocity.shape != (x_axis.size, z_axis.size):
+        raise WorkflowBuildError("velocity must have shape [nx, nz].")
+    if points.ndim != 2 or points.shape[1] != 2 or points.shape[0] == 0:
+        raise WorkflowBuildError("reflector_grid_indices must have shape [npoint, 2].")
+    if source.shape != (2,) or not np.isfinite(source).all():
+        raise WorkflowBuildError("source_coordinate must contain finite [x, z].")
+    if np.any(np.diff(x_axis) <= 0) or np.any(np.diff(z_axis) <= 0):
+        raise WorkflowBuildError("x_axis and z_axis must be strictly increasing.")
+
+    ix = int(np.argmin(np.abs(x_axis - source[0])))
+    tolerance = 0.5 * float(np.min(np.diff(x_axis))) + np.finfo(float).eps
+    if abs(float(x_axis[ix]) - float(source[0])) > tolerance:
+        raise WorkflowBuildError("source x is outside the velocity-grid tolerance.")
+    point = points[int(np.argmin(np.abs(points[:, 1] - ix)))]
+    iz_reflector = int(point[0])
+    if not 0 <= iz_reflector < z_axis.size:
+        raise WorkflowBuildError("reflector depth index is outside the velocity grid.")
+    reflector_depth = float(z_axis[iz_reflector])
+    if not float(z_axis[0]) <= source[1] <= reflector_depth:
+        raise WorkflowBuildError("source depth must lie between grid top and reflector.")
+
+    slowness = 1.0 / velocity[ix]
+    cumulative = np.zeros(z_axis.size, dtype=float)
+    cumulative[1:] = np.cumsum(
+        0.5 * (slowness[:-1] + slowness[1:]) * np.diff(z_axis)
+    )
+    source_time = float(np.interp(source[1], z_axis, cumulative))
+    return 2.0 * (float(cumulative[iz_reflector]) - source_time), reflector_depth
+
+
 class OuterStageWindowBuilder:
     """Build Steps 1–6 once after migration/reflector update.
 
@@ -329,6 +373,19 @@ class OuterStageWindowBuilder:
             traveltime_table=self.traveltime_table,
             workers=self.config.eikonal_workers,
         )
+        same_x_time = np.empty((len(mappings), sources.shape[0]), dtype=float)
+        same_x_depth = np.empty_like(same_x_time)
+        for reflector, mapping in enumerate(mappings):
+            for shot, source in enumerate(sources):
+                same_x_time[reflector, shot], same_x_depth[reflector, shot] = (
+                    compute_same_x_control_time(
+                        velocity,
+                        self.config.grid.x_axis,
+                        self.config.grid.z_axis,
+                        mapping.indices,
+                        source,
+                    )
+                )
         # Eikonal output is a geometric propagation time.  A causal source
         # wavelet may define its diagnostic event (for example, its peak) at
         # a non-zero time.  The configured shift converts geometric time to
@@ -400,6 +457,8 @@ class OuterStageWindowBuilder:
             config=self.config,
             source_coordinates=sources,
             receiver_coordinates=receivers,
+            same_x_control_time=same_x_time,
+            same_x_reflector_depth=same_x_depth,
             reference_qc=fixed_quality,
             reference_tracking=reference_tracking,
             reference_shift_time=reference_shift_time,
