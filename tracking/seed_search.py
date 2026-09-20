@@ -92,6 +92,11 @@ class BoundarySeedCandidate:
     rejection_reason: str
     selected: bool
     seed: SeedSearchResult | None
+    # Repair-only event-first seed selection needs the complete short path,
+    # not just the final anchor/long-pilot verdict.  A hypothesis whose own
+    # anchor later fails may still be useful evidence that a coherent short
+    # event exists in the gather.
+    short_pilot: SeedPilotResult | None = None
 
 
 def _contiguous_valid_mask(valid: np.ndarray, seed: int) -> np.ndarray:
@@ -194,6 +199,63 @@ def _hypotheses(
     if int(max_hypotheses) > 0:
         items = items[: int(max_hypotheses)]
     return items
+
+
+def build_interlayer_repair_state_valid(
+    state_valid, upper_neighbor_state_valid=None, lower_neighbor_state_valid=None,
+    *, guard_samples=0,
+):
+    """Return the repair-only safe band between adjacent reflector ownerships.
+
+    Boundary repair must not be forced to remain inside the failed reflector's
+    original ownership corridor.  Instead, the upper/lower neighboring
+    reflectors define hard physical bounds.  A small guard is removed next to
+    each neighbor so repair seeds/tracks cannot sit on or immediately beside a
+    neighboring reflector.  If both neighbors are absent, fall back to the
+    original ownership mask.
+    """
+    current = np.asarray(state_valid, dtype=bool)
+    if current.ndim != 2:
+        raise ValueError("state_valid must have shape [nreceiver, ntime]")
+    upper = None if upper_neighbor_state_valid is None else np.asarray(upper_neighbor_state_valid, dtype=bool)
+    lower = None if lower_neighbor_state_valid is None else np.asarray(lower_neighbor_state_valid, dtype=bool)
+    for name, value in (("upper_neighbor_state_valid", upper), ("lower_neighbor_state_valid", lower)):
+        if value is not None and value.shape != current.shape:
+            raise ValueError(f"{name} must match state_valid")
+
+    if upper is None and lower is None:
+        return current.copy()
+
+    guard = max(0, int(guard_samples))
+    nreceiver, ntime = current.shape
+    safe = np.zeros_like(current)
+    for receiver in range(nreceiver):
+        start = 0
+        stop = ntime
+        if upper is not None:
+            indices = np.flatnonzero(upper[receiver])
+            if indices.size:
+                start = int(indices[-1]) + 1 + guard
+        if lower is not None:
+            indices = np.flatnonzero(lower[receiver])
+            if indices.size:
+                stop = int(indices[0]) - guard
+        start = max(0, min(start, ntime))
+        stop = max(0, min(stop, ntime))
+        if start < stop:
+            safe[receiver, start:stop] = True
+
+    # Explicitly remove the neighboring ownerships and their guard zones even
+    # if a pathological/non-contiguous neighbor mask was supplied.
+    for neighbor in (upper, lower):
+        if neighbor is None:
+            continue
+        forbidden = neighbor.copy()
+        for step in range(1, guard + 1):
+            forbidden[:, step:] |= neighbor[:, :-step]
+            forbidden[:, :-step] |= neighbor[:, step:]
+        safe &= ~forbidden
+    return safe
 
 
 def _pilot(
@@ -430,7 +492,13 @@ def discover_boundary_seed_candidates(
     anchor=None, tracker_options=None, reference_time=None,
     upper_neighbor_state_valid=None, lower_neighbor_state_valid=None, **_unused,
 ):
-    """Return the top three inward-pilot seeds at one aperture edge."""
+    """Evaluate boundary positive-peak hypotheses for repair.
+
+    The complete short-pilot path is retained in every returned row so the
+    repair caller can identify a coherent event first and choose a seed on
+    that event second.  Normal ``discover_tracking_seed`` behavior is not
+    changed by this repair-only data exposure.
+    """
 
     flat = np.asarray(flat_gather, dtype=float)
     x = np.asarray(receiver_x, dtype=float)
@@ -461,21 +529,28 @@ def discover_boundary_seed_candidates(
     envelope = np.abs(hilbert(traces[evidence_subset], axis=-1))
     time = float(t0) + np.arange(flat.shape[1]) * float(dt)
     evidence_half = max(1, int(round(float(evidence_half_width_time) / float(dt))))
-    exclusive = ownership[seed].copy()
-    if upper_neighbor_state_valid is not None:
-        exclusive &= ~np.asarray(upper_neighbor_state_valid, bool)[seed]
-    if lower_neighbor_state_valid is not None:
-        exclusive &= ~np.asarray(lower_neighbor_state_valid, bool)[seed]
-    exclusive_hypotheses = _hypotheses(
-        traces, envelope, seed, evidence_subset, time, exclusive,
+
+    # Repair-only search domain: do not force the seed back into the failed
+    # reflector's original ownership.  The neighboring reflectors are the
+    # physical bounds.  Reuse the existing evidence half-width as the guard so
+    # there is no new tuning parameter.
+    repair_ownership = build_interlayer_repair_state_valid(
+        ownership,
+        upper_neighbor_state_valid,
+        lower_neighbor_state_valid,
+        guard_samples=evidence_half,
+    )
+    safe_hypotheses = _hypotheses(
+        traces, envelope, seed, evidence_subset, time, repair_ownership[seed],
         max_hypotheses=0, evidence_half_samples=evidence_half,
     )
+    # Keep the old current-ownership count only as a diagnostic.  It no longer
+    # controls which peaks are allowed to enter repair validation.
     ownership_hypotheses = _hypotheses(
         traces, envelope, seed, evidence_subset, time, ownership[seed],
         max_hypotheses=0, evidence_half_samples=evidence_half,
     )
-    overlap_fallback = not exclusive_hypotheses
-    all_hypotheses = ownership_hypotheses if overlap_fallback else exclusive_hypotheses
+    all_hypotheses = safe_hypotheses
     hypotheses = list(all_hypotheses[: int(max_ownership_hypotheses)])
     strongest = sorted(all_hypotheses, key=lambda item: item[2], reverse=True)[:2]
     selected_samples = {int(item[1]) for item in hypotheses}
@@ -497,7 +572,7 @@ def discover_boundary_seed_candidates(
     rows = []
     for index, hypothesis in enumerate(hypotheses):
         short = _pilot(
-            flat, x, valid, ownership, seed, hypothesis, options, short_subset,
+            flat, x, valid, repair_ownership, seed, hypothesis, options, short_subset,
             pilot_min_side_support_receivers, pilot_min_coverage,
             pilot_min_median_zncc, phase_switch_zncc,
             phase_switch_prediction_time,
@@ -514,7 +589,7 @@ def discover_boundary_seed_candidates(
         long = None
         if accepted:
             long = _pilot(
-                flat, x, valid, ownership, seed, hypothesis, options, long_subset,
+                flat, x, valid, repair_ownership, seed, hypothesis, options, long_subset,
                 pilot_min_side_support_receivers, pilot_min_coverage,
                 pilot_min_median_zncc, phase_switch_zncc,
                 phase_switch_prediction_time,
@@ -586,8 +661,9 @@ def discover_boundary_seed_candidates(
             float(long.median_abs_slope_ms_per_100m) if long is not None else np.nan,
             float(long.p90_abs_slope_ms_per_100m) if long is not None else np.nan,
             int(long.phase_switch_count) if long is not None else 0,
-            len(ownership_hypotheses), len(exclusive_hypotheses),
-            bool(overlap_fallback), tuple(rank), rejection, id(row) in selected_ids, result,
+            len(ownership_hypotheses), len(safe_hypotheses),
+            False, tuple(rank), rejection, id(row) in selected_ids, result,
+            short,
         ))
     return tuple(output)
 
@@ -1032,5 +1108,6 @@ def discover_tracking_seed(
 
 __all__ = [
     "BoundarySeedCandidate", "SeedPilotResult", "SeedSearchResult",
+    "build_interlayer_repair_state_valid",
     "discover_boundary_seed_candidates", "discover_tracking_seed",
 ]

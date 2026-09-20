@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import warnings
 from pathlib import Path
+from time import perf_counter
 from typing import Iterable
 
 import numpy as np
@@ -363,6 +364,8 @@ class OuterStageWindowBuilder:
             strict=True,
         )
 
+        stage_started = perf_counter()
+        print("[WRTI init] Eikonal reflection traveltimes: start", flush=True)
         traveltime_result: ReflectionTraveltimeResult = compute_reflection_traveltimes(
             velocity,
             self.config.grid.x_axis,
@@ -373,6 +376,13 @@ class OuterStageWindowBuilder:
             traveltime_table=self.traveltime_table,
             workers=self.config.eikonal_workers,
         )
+        print(
+            f"[WRTI init] Eikonal reflection traveltimes: complete | "
+            f"elapsed={perf_counter() - stage_started:.1f}s",
+            flush=True,
+        )
+        stage_started = perf_counter()
+        print("[WRTI init] same-x control times: start", flush=True)
         same_x_time = np.empty((len(mappings), sources.shape[0]), dtype=float)
         same_x_depth = np.empty_like(same_x_time)
         for reflector, mapping in enumerate(mappings):
@@ -386,6 +396,11 @@ class OuterStageWindowBuilder:
                         source,
                     )
                 )
+        print(
+            f"[WRTI init] same-x control times: complete | "
+            f"elapsed={perf_counter() - stage_started:.1f}s",
+            flush=True,
+        )
         # Eikonal output is a geometric propagation time.  A causal source
         # wavelet may define its diagnostic event (for example, its peak) at
         # a non-zero time.  The configured shift converts geometric time to
@@ -421,6 +436,8 @@ class OuterStageWindowBuilder:
         recovery_counts: dict[str, object] | None = None
         saved_correlations: dict[tuple[int, int], CorrelationResult] = {}
         if observed_data is not None and reference_synthetic_data is not None:
+            stage_started = perf_counter()
+            print("[WRTI init] legacy observed/synthetic ZNCC: start", flush=True)
             (
                 fixed_quality,
                 reference_tracking,
@@ -433,6 +450,13 @@ class OuterStageWindowBuilder:
                 sources,
                 receivers,
             )
+            print(
+                f"[WRTI init] legacy observed/synthetic ZNCC: complete | "
+                f"elapsed={perf_counter() - stage_started:.1f}s",
+                flush=True,
+            )
+            stage_started = perf_counter()
+            print("[WRTI init] legacy observed-center recovery: start", flush=True)
             observed_for_recovery = self._observed_data_for_recovery(
                 observed_data,
                 reference_synthetic_data,
@@ -444,6 +468,11 @@ class OuterStageWindowBuilder:
                 observed_for_recovery,
                 sources,
                 receivers,
+            )
+            print(
+                f"[WRTI init] legacy observed-center recovery: complete | "
+                f"elapsed={perf_counter() - stage_started:.1f}s",
+                flush=True,
             )
 
         state = WRTIReferenceState(

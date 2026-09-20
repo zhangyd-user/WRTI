@@ -11,6 +11,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 import multiprocessing as mp
 import os
+from time import perf_counter
 from typing import Callable, Iterable, Sequence
 
 import numpy as np
@@ -335,6 +336,12 @@ def build_source_receiver_fields(
         # the PyLops table backend expects both point sets.  The number of
         # tasks is therefore bounded by the smaller point population.
         task_count = min(worker_count, n_source, n_receiver)
+        started = perf_counter()
+        print(
+            f"[WRTI Eikonal] starting {task_count} worker batches | "
+            f"sources={n_source} unique_receivers={n_receiver} grid={velocity.shape}",
+            flush=True,
+        )
         source_chunks = np.array_split(np.arange(n_source, dtype=int), task_count)
         receiver_chunks = np.array_split(
             np.arange(n_receiver, dtype=int), task_count
@@ -377,6 +384,11 @@ def build_source_receiver_fields(
                     batch_index = future_batches[future]
                     try:
                         results.append(future.result())
+                        print(
+                            f"[WRTI Eikonal] batch {len(results)}/{task_count} complete | "
+                            f"elapsed={perf_counter() - started:.1f}s",
+                            flush=True,
+                        )
                     except Exception as exc:
                         raise ReflectionTraveltimeError(
                             "Parallel Eikonal batch "
@@ -411,6 +423,10 @@ def build_source_receiver_fields(
         ) in results:
             source_fields[source_indices] = source_batch
             receiver_fields[receiver_indices] = receiver_batch
+        print(
+            f"[WRTI Eikonal] all batches complete | elapsed={perf_counter() - started:.1f}s",
+            flush=True,
+        )
     return source_fields, receiver_fields, geometry.trace_to_unique
 
 
