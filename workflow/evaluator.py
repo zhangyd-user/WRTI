@@ -5,13 +5,14 @@ from __future__ import annotations
 from dataclasses import replace
 import logging
 from types import MappingProxyType
+import warnings
 
 import numpy as np
 
 from ..correlation import CorrelationResult, PreprocessHook
 from ..misfit import MisfitError, MisfitResult, compute_vfsa_misfit
 from ..tracking import TrackingResult
-from ..window import WindowResult, build_window_result
+from ..window import WindowOverlapWarning, WindowResult, build_window_result
 
 from .parallel import ShotTrackingTask, run_shot_tasks, slice_windows_for_shot
 from .state import WRTIReferenceState
@@ -28,26 +29,28 @@ def _paired_dual_center_windows(
 ) -> tuple[WindowResult, WindowResult]:
     """Build equal-length observed/synthetic windows around independent centers."""
 
-    observed = build_window_result(
-        observed_windows.center_time,
-        observed_windows.dt,
-        observed_windows.t0,
-        observed_windows.nt,
-        observed_windows.half_window_time,
-        window_type=observed_windows.window_type,
-        tukey_alpha=observed_windows.tukey_alpha,
-        max_lag_time=max_lag_time,
-    )
-    synthetic = build_window_result(
-        tsyn_theory,
-        observed_windows.dt,
-        observed_windows.t0,
-        observed_windows.nt,
-        observed_windows.half_window_time,
-        window_type=observed_windows.window_type,
-        tukey_alpha=observed_windows.tukey_alpha,
-        max_lag_time=max_lag_time,
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", WindowOverlapWarning)
+        observed = build_window_result(
+            observed_windows.center_time,
+            observed_windows.dt,
+            observed_windows.t0,
+            observed_windows.nt,
+            observed_windows.half_window_time,
+            window_type=observed_windows.window_type,
+            tukey_alpha=observed_windows.tukey_alpha,
+            max_lag_time=max_lag_time,
+        )
+        synthetic = build_window_result(
+            tsyn_theory,
+            observed_windows.dt,
+            observed_windows.t0,
+            observed_windows.nt,
+            observed_windows.half_window_time,
+            window_type=observed_windows.window_type,
+            tukey_alpha=observed_windows.tukey_alpha,
+            max_lag_time=max_lag_time,
+        )
     left_offset = observed.left_sample - observed.center_sample
     right_offset = observed.right_sample - observed.center_sample
     left = synthetic.center_sample + left_offset
@@ -105,6 +108,7 @@ class WRTIObjectiveEvaluator:
         self.logger = logger or logging.getLogger("WRTI.workflow")
         self.last_correlation_results = MappingProxyType({})
         self.last_tracking_results = MappingProxyType({})
+        self._evaluation_count = 0
 
     @property
     def reference_state(self) -> WRTIReferenceState:
@@ -191,9 +195,11 @@ class WRTIObjectiveEvaluator:
             ]
         # Retain five acquisition shots, evenly distributed from the first
         # to the last shot, for one PNG diagnostic per VFSA evaluation.
-        diagnostic_shots = np.rint(
-            np.linspace(0, ns - 1, min(5, ns))
-        ).astype(int)
+        diagnostic_shots = (
+            np.arange(ns, dtype=int)
+            if self._evaluation_count < 3
+            else np.rint(np.linspace(0, ns - 1, min(5, ns))).astype(int)
+        )
         selected = set(state.config.save_correlation_for)
         selected.update(
             (reflector, int(shot))
@@ -213,6 +219,10 @@ class WRTIObjectiveEvaluator:
                     if synthetic_windows is None
                     else slice_windows_for_shot(synthetic_windows, shot)
                 ),
+                receiver_mask=(
+                    evaluation_fixed_mask[:, shot, :] if dual_center else None
+                ),
+                max_consecutive_dp_failures=3,
                 ownership_center_time=ownership_center_time[:, shot : shot + 1, :],
                 source_coordinates=state.source_coordinates[shot],
                 receiver_coordinates=state.receiver_coordinates[shot],
@@ -306,6 +316,7 @@ class WRTIObjectiveEvaluator:
 
         self.last_correlation_results = MappingProxyType(saved_correlations)
         self.last_tracking_results = MappingProxyType(saved_tracking)
+        self._evaluation_count += 1
         successful_correlation = tracked_correlation[tracking_success]
         mean_correlation = (
             float(np.nanmean(successful_correlation))

@@ -384,11 +384,6 @@ def build_source_receiver_fields(
                     batch_index = future_batches[future]
                     try:
                         results.append(future.result())
-                        print(
-                            f"[WRTI Eikonal] batch {len(results)}/{task_count} complete | "
-                            f"elapsed={perf_counter() - started:.1f}s",
-                            flush=True,
-                        )
                     except Exception as exc:
                         raise ReflectionTraveltimeError(
                             "Parallel Eikonal batch "
@@ -423,10 +418,6 @@ def build_source_receiver_fields(
         ) in results:
             source_fields[source_indices] = source_batch
             receiver_fields[receiver_indices] = receiver_batch
-        print(
-            f"[WRTI Eikonal] all batches complete | elapsed={perf_counter() - started:.1f}s",
-            flush=True,
-        )
     return source_fields, receiver_fields, geometry.trace_to_unique
 
 

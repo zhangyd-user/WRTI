@@ -281,6 +281,49 @@ class TrackingStep5Tests(unittest.TestCase):
         self.assertEqual(result.seed_lag, 150.0)
         self.assertTrue(result.success_mask.all())
 
+    def test_receiver_mask_segments_restart_independently(self) -> None:
+        lags = np.arange(-2, 3, dtype=int)
+        correlation = np.full((8, lags.size), np.nan)
+        correlation[:, 2] = 1.0
+        result = track_zncc(
+            correlation,
+            lags,
+            receiver_x=np.arange(8, dtype=float),
+            source_x=1.0,
+            seed_lag_range_time=1.0,
+            epsilon_time=1.0,
+            dt=1.0,
+            receiver_mask=np.array([1, 1, 1, 0, 0, 1, 1, 1], dtype=bool),
+        )
+        np.testing.assert_array_equal(
+            result.success_mask,
+            np.array([1, 1, 1, 0, 0, 1, 1, 1], dtype=bool),
+        )
+
+    def test_receiver_mask_dp_crosses_at_most_three_bad_rows(self) -> None:
+        lags = np.arange(-2, 3, dtype=int)
+
+        def run(nbad):
+            correlation = np.full((8, lags.size), np.nan)
+            correlation[:, 2] = 1.0
+            correlation[3 : 3 + nbad] = np.nan
+            return track_zncc(
+                correlation,
+                lags,
+                receiver_x=np.arange(8, dtype=float),
+                source_x=1.0,
+                seed_lag_range_time=1.0,
+                epsilon_time=1.0,
+                dt=1.0,
+                receiver_mask=np.ones(8, dtype=bool),
+                max_consecutive_failures=3,
+            )
+
+        three = run(3)
+        self.assertTrue(three.success_mask[6:].all())
+        four = run(4)
+        self.assertFalse(four.success_mask[7])
+
     def test_seed_tracks_right_with_hard_continuity(self) -> None:
         correlation = np.full((4, self.lags.size), np.nan)
         desired = [0, 1, 2, 3]

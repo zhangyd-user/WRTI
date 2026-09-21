@@ -176,10 +176,12 @@ class WorkflowSmokeTests(unittest.TestCase):
 
         np.testing.assert_allclose(result.tobs, 22.0)
         np.testing.assert_allclose(result.tsyn_theory, 20.0)
-        np.testing.assert_allclose(result.local_shift_time, 1.0, atol=0.05)
+        # The synthetic fixture uses dt=1 s, so the production +/-30 ms
+        # candidate seed rule admits only zero lag at the source receiver.
+        np.testing.assert_allclose(result.local_shift_time, [[[1.0, 0.0, 1.0]]])
         np.testing.assert_allclose(result.coarse_shift_time, 2.0)
-        np.testing.assert_allclose(result.tsyn_picked, 21.0, atol=0.05)
-        np.testing.assert_allclose(result.shift_time, 1.0, atol=0.05)
+        np.testing.assert_allclose(result.tsyn_picked, [[[21.0, 20.0, 21.0]]])
+        np.testing.assert_allclose(result.shift_time, [[[1.0, 2.0, 1.0]]])
 
     def test_diagnostic_plot_is_written_after_evaluation(self) -> None:
         state, observed, synthetic = self._state_and_data()

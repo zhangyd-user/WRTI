@@ -230,6 +230,9 @@ def save_vfsa_diagnostic(
     low_correlation_qc_mask_array=None,
     boundary_qc_mask_array=None,
     total_shift_time_array=None,
+    tsyn_theory_array=None,
+    tsyn_picked_array=None,
+    data_invalid_mask_array=None,
     shot: int | None = None,
     dpi: int = 180,
 ):
@@ -262,6 +265,21 @@ def save_vfsa_diagnostic(
         total_shift = np.asarray(total_shift_time_array, dtype=float)
         if total_shift.shape != reference_state.shape:
             raise ValueError("total_shift_time_array must match reference_state.shape.")
+    tsyn_theory = None
+    if tsyn_theory_array is not None:
+        tsyn_theory = np.asarray(tsyn_theory_array, dtype=float)
+        if tsyn_theory.shape != reference_state.shape:
+            raise ValueError("tsyn_theory_array must match reference_state.shape.")
+    tsyn_picked = None
+    if tsyn_picked_array is not None:
+        tsyn_picked = np.asarray(tsyn_picked_array, dtype=float)
+        if tsyn_picked.shape != reference_state.shape:
+            raise ValueError("tsyn_picked_array must match reference_state.shape.")
+    data_invalid = None
+    if data_invalid_mask_array is not None:
+        data_invalid = np.asarray(data_invalid_mask_array, dtype=bool)
+        if data_invalid.shape != reference_state.shape:
+            raise ValueError("data_invalid_mask_array must match reference_state.shape.")
     if any(value is not None for value in supplied_masks):
         if not all(value is not None for value in supplied_masks):
             raise ValueError(
@@ -311,7 +329,11 @@ def save_vfsa_diagnostic(
         )
         for reflector in range(nref):
             color = colors[reflector % len(colors)]
-            reference_center = reference_state.windows.center_time[reflector, shot]
+            reference_center = (
+                reference_state.windows.center_time[reflector, shot]
+                if tsyn_theory is None
+                else tsyn_theory[reflector, shot]
+            )
             valid = reference_state.evaluation_observed_windows.valid[reflector, shot]
             center = reference_state.evaluation_observed_windows.center_time[reflector, shot]
             good = valid & np.isfinite(center)
@@ -392,6 +414,24 @@ def save_vfsa_diagnostic(
                     linewidth=0.7,
                     zorder=6,
                 )
+                path_failed = (
+                    path_failure_mask(tracking)
+                    if path_failure_mask_array is None
+                    else supplied_masks[0][reflector, shot]
+                )
+                fallback = path_failed & good
+                if tsyn_picked is not None:
+                    fallback &= np.isfinite(tsyn_picked[reflector, shot])
+                    ax.scatter(
+                        receiver_x[fallback],
+                        tsyn_picked[reflector, shot, fallback],
+                        marker="D",
+                        s=16,
+                        color=color,
+                        edgecolor="white",
+                        linewidth=0.35,
+                        zorder=7,
+                    )
         ax.set_xlim(receiver_x[0], receiver_x[-1])
         ax.set_ylim(time[-1], max(0.25, time[0]))
         ax.set_xlabel("Receiver x (km)")
@@ -507,11 +547,12 @@ def save_vfsa_diagnostic(
         )
         ax.set_title(
             f"R{reflector + 1} ZNCC / tracking\n"
-            f"coarse seed {seed_text}; "
-            f"eps={reference_state.config.envelope_tracking_epsilon_time * 1000.0:.0f} ms; "
-            f"fallback={correlation.coarse_tracking_fallback_count}; "
+            f"seed: {seed_text}\n"
+            f"eps={reference_state.config.envelope_tracking_epsilon_time * 1000.0:.0f} ms | "
+            f"fallback={correlation.coarse_tracking_fallback_count} | "
             f"max Δ={max_adjacent_jump:.1f} ms",
-            fontsize=8,
+            fontsize=7,
+            pad=3,
         )
         ax.set_xlabel("Receiver x (km)")
         if reflector == 0:
@@ -551,6 +592,28 @@ def save_vfsa_diagnostic(
             residual_shift[included][::5] * 1000.0,
             color=color,
             s=7,
+        )
+        path_failed = (
+            path_failure_mask(tracking)
+            if path_failure_mask_array is None
+            else supplied_masks[0][reflector, shot]
+        )
+        fallback = (
+            reference_state.evaluation_fixed_mask[reflector, shot]
+            & path_failed
+            & np.isfinite(residual_shift)
+        )
+        if data_invalid is not None:
+            fallback &= ~data_invalid[reflector, shot]
+        residual_ax.scatter(
+            receiver_x[fallback],
+            residual_shift[fallback] * 1000.0,
+            marker="D",
+            s=16,
+            color=color,
+            edgecolor="white",
+            linewidth=0.35,
+            zorder=5,
         )
         quality = success & np.isfinite(tracking.tracked_correlation)
         quality_ax.plot(
@@ -650,6 +713,9 @@ def save_vfsa_diagnostics(
     low_correlation_qc_mask_array=None,
     boundary_qc_mask_array=None,
     total_shift_time_array=None,
+    tsyn_theory_array=None,
+    tsyn_picked_array=None,
+    data_invalid_mask_array=None,
     shots=None,
     dpi: int = 180,
 ):
@@ -685,6 +751,9 @@ def save_vfsa_diagnostics(
                 low_correlation_qc_mask_array=low_correlation_qc_mask_array,
                 boundary_qc_mask_array=boundary_qc_mask_array,
                 total_shift_time_array=total_shift_time_array,
+                tsyn_theory_array=tsyn_theory_array,
+                tsyn_picked_array=tsyn_picked_array,
+                data_invalid_mask_array=data_invalid_mask_array,
                 shot=shot,
                 dpi=dpi,
             )

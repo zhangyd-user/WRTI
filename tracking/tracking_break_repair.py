@@ -5,6 +5,10 @@ from dataclasses import dataclass, replace
 from itertools import combinations
 import numpy as np
 
+
+# Tracking-break repair diagnostics are intentionally quiet in production.
+print = lambda *args, **kwargs: None
+
 from .flat_event import track_flattened_event_sparse
 from .quality_control import QualityAuditConfig, audit_rkshot
 from .seed_search import (

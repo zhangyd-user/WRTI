@@ -51,6 +51,8 @@ class ShotTrackingTask:
     tracking_receiver_stack: bool = True
     tracking_raw_refine_radius_samples: int = 1
     synthetic_windows: WindowResult | None = None
+    receiver_mask: np.ndarray | None = None
+    max_consecutive_dp_failures: int = 3
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,14 @@ def run_shot_zncc_tracking(task: ShotTrackingTask) -> ShotTrackingResult:
         raise WRTIParallelError(
             f"Shot {shot} gather shape is inconsistent with its windows."
         )
+    tracking_receiver_mask = None
+    if task.receiver_mask is not None:
+        tracking_receiver_mask = np.asarray(task.receiver_mask, dtype=bool)
+        if tracking_receiver_mask.shape != (nref, nr):
+            raise WRTIParallelError(
+                "receiver_mask must have shape [nref, nreceiver]; "
+                f"got {tracking_receiver_mask.shape}, expected {(nref, nr)}."
+            )
     receiver_x = np.asarray(task.receiver_coordinates[:, 0], dtype=float)
     source_x = float(task.source_coordinates[0])
     selected = set(int(value) for value in task.selected_reflectors)
@@ -169,6 +179,15 @@ def run_shot_zncc_tracking(task: ShotTrackingTask) -> ShotTrackingResult:
             boundary_margin_samples=task.boundary_margin_samples,
             raw_refine_radius_samples=task.tracking_raw_refine_radius_samples,
             restrict_seed_lag_range=dual_center,
+            receiver_mask=(
+                None
+                if tracking_receiver_mask is None
+                else tracking_receiver_mask[reflector]
+            ),
+            max_consecutive_failures=(
+                int(task.max_consecutive_dp_failures) if dual_center else 0
+            ),
+            hard_min_correlation=dual_center,
         )
         completion = complete_tracked_shift(
             tracking,

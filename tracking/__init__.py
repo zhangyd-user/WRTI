@@ -12,7 +12,12 @@ from .flat_event import (
     SparseFlatTrackingResult,
     track_flattened_event_sparse,
 )
-from .quality import boundary_qc_mask, low_correlation_qc_mask, path_failure_mask
+from .quality import (
+    boundary_qc_mask,
+    dp_failure_mask,
+    low_correlation_qc_mask,
+    path_failure_mask,
+)
 from .quality_control import (
     QualityAuditConfig,
     RkShotAudit,
@@ -29,6 +34,7 @@ __all__ = [
     "track_correlation_result",
     "track_zncc",
     "path_failure_mask",
+    "dp_failure_mask",
     "low_correlation_qc_mask",
     "boundary_qc_mask",
     "QualityAuditConfig",

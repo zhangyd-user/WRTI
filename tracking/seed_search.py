@@ -279,15 +279,20 @@ def _pilot(
         return None
 
     local_seed = int(np.flatnonzero(subset == int(seed))[0])
-    tracked = track_flattened_event_sparse(
-        flat[subset],
-        receiver_x=x[subset],
-        valid_receiver=valid[subset],
-        seed_receiver=local_seed,
-        seed_time=hypothesis[0],
-        state_valid=ownership[subset],
-        **options,
-    )
+    try:
+        tracked = track_flattened_event_sparse(
+            flat[subset],
+            receiver_x=x[subset],
+            valid_receiver=valid[subset],
+            seed_receiver=local_seed,
+            seed_time=hypothesis[0],
+            state_valid=ownership[subset],
+            **options,
+        )
+    except ValueError as error:
+        if str(error) != "same-x seed waveform window is outside the record":
+            raise
+        return None
 
     success_local = tracked.success_mask.copy()
     success_local[local_seed] = False

@@ -19,7 +19,6 @@ All Eikonal times are used only through their relative moveout.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from time import perf_counter
 from types import MappingProxyType
 from typing import Mapping
 
@@ -936,7 +935,6 @@ def build_observed_centers_from_eikonal(
     # Legacy diagnostic arguments remain in the public signature only for config compatibility.
 
     for shot in range(nshot):
-        shot_started = perf_counter()
         i0 = nearest_offset_receiver(sources[shot], receivers[shot])
         control_receiver[shot] = i0
         moveouts = tref[:, shot] - tref[:, shot, i0, None]
@@ -1454,17 +1452,6 @@ def build_observed_centers_from_eikonal(
                 (sparse.pick_sample <= margin)
                 | (sparse.pick_sample >= observed.shape[2] - 1 - margin)
             )
-        if tracking_method == "sparse_event_dp":
-            before = candidate_count_before[:, shot]
-            after = candidate_count[:, shot]
-            print(
-                f"[Tobs bootstrap] shot {shot + 1}/{nshot} complete | "
-                f"candidates median {np.median(before):.1f}->{np.median(after):.1f} | "
-                f"transitions={sparse_totals['transitions']} | "
-                f"elapsed={perf_counter() - shot_started:.1f}s",
-                flush=True,
-            )
-
     counts = {
         "total_slots": int(center.size),
         "tracked_slots": int(np.count_nonzero(tracking_success)),

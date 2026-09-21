@@ -1,5 +1,6 @@
 import numpy as np
 
+from WRTI.tracking import seed_search
 from WRTI.tracking.seed_search import (
     discover_boundary_seed_candidates,
     discover_tracking_seed,
@@ -51,6 +52,19 @@ def test_failed_pilots_return_invalid_seed_instead_of_control_fallback():
     result = _discover(flat, 0.200)
     assert not result.valid and result.mode == "FAILED"
     assert np.isnan(result.seed_time)
+
+
+def test_pilot_rejects_seed_waveform_outside_record(monkeypatch):
+    def reject(*args, **kwargs):
+        raise ValueError("same-x seed waveform window is outside the record")
+
+    monkeypatch.setattr(seed_search, "track_flattened_event_sparse", reject)
+    flat = np.zeros((3, 20))
+    result = seed_search._pilot(
+        flat, np.arange(3.0), np.ones(3, bool), np.ones_like(flat, bool),
+        1, (0.001,), {}, np.arange(3), 1, 0.8, 0.7, 0.0, 0.015,
+    )
+    assert result is None
 
 
 def test_ownership_wide_finds_positive_event_beyond_adaptive_window():
