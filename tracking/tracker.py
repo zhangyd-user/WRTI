@@ -465,6 +465,7 @@ def track_zncc(
     boundary_margin_samples: int = 0,
     boundary_margin_time: float | None = None,
     raw_refine_radius_samples: int = 1,
+    restrict_seed_lag_range: bool = False,
 ) -> TrackingResult:
     """Track the best seed-centered bidirectional receiver-lag ZNCC ridge.
 
@@ -492,6 +493,8 @@ def track_zncc(
     _normalise_nonnegative_time(
         seed_lag_range_time, "seed_lag_range_time"
     )
+    if not isinstance(restrict_seed_lag_range, (bool, np.bool_)):
+        raise TrackingError("restrict_seed_lag_range must be boolean.")
     epsilon = _normalise_nonnegative_time(epsilon_time, "epsilon_time")
     epsilon_samples = int(round(epsilon / float(dt)))
     margin_samples = _normalise_boundary_margin(
@@ -511,6 +514,25 @@ def track_zncc(
 
     n_receiver = values.shape[0]
     seed_receiver = int(np.argmin(np.abs(receivers - float(source_x))))
+
+    # Preserve the original DP behavior by default.  In the dual-center
+    # candidate stage, callers can restrict only the seed receiver to the
+    # configured central lag range while keeping the full lag domain for all
+    # outward receivers.
+    guide_row_valid = np.array(row_valid, dtype=bool, copy=True)
+
+    # Restrict ONLY the seed receiver to the configured lag range.
+    # Compare in physical time rather than rounded samples so a 30 ms
+    # limit remains a strict +/-30 ms bound even when dt does not divide
+    # 30 ms exactly.  All outward receivers keep the full lag domain.
+    seed_allowed = np.ones(lags.shape, dtype=bool)
+    if restrict_seed_lag_range:
+        seed_allowed = (
+            np.abs(lags.astype(float) * float(dt))
+            <= float(seed_lag_range_time) + 1.0e-12
+        )
+        guide_row_valid[seed_receiver] &= seed_allowed
+
     guide_path_index = np.full(n_receiver, -1, dtype=int)
     shift_samples = np.full(n_receiver, np.nan, dtype=float)
     shift_time = np.full(n_receiver, np.nan, dtype=float)
@@ -521,12 +543,12 @@ def track_zncc(
 
     max_abs_lag = float(np.max(np.abs(lags)))
     boundary_limit = max_abs_lag - float(margin_samples)
-    for segment in _valid_receiver_segments(row_valid):
+    for segment in _valid_receiver_segments(guide_row_valid):
         if not np.any(segment == seed_receiver):
             continue
         segment_path = _global_dp_segment(
             values,
-            row_valid,
+            guide_row_valid,
             lags,
             segment,
             seed_receiver=seed_receiver,
@@ -551,6 +573,12 @@ def track_zncc(
         rows = np.broadcast_to(guide_success[:, None], columns.shape)
         raw_corridor_valid[rows[inside], columns[inside]] = True
     raw_corridor_valid &= raw_valid
+
+    # The second/raw DP must obey the same seed restriction.  Without this,
+    # the +/- raw refinement corridor can move the final waveform-DP seed
+    # outside the requested +/-30 ms range even when the guide seed was valid.
+    if restrict_seed_lag_range:
+        raw_corridor_valid[seed_receiver] &= seed_allowed
 
     path_index = np.full(n_receiver, -1, dtype=int)
     for segment in _valid_receiver_segments(raw_corridor_valid):
@@ -610,6 +638,7 @@ def track_correlation_result(
     boundary_margin_samples: int = 0,
     boundary_margin_time: float | None = None,
     raw_refine_radius_samples: int = 1,
+    restrict_seed_lag_range: bool = False,
 ) -> TrackingResult:
     """Track a Step 4 ``CorrelationResult`` without copying its matrix."""
 
@@ -640,4 +669,5 @@ def track_correlation_result(
         boundary_margin_samples=boundary_margin_samples,
         boundary_margin_time=boundary_margin_time,
         raw_refine_radius_samples=raw_refine_radius_samples,
+        restrict_seed_lag_range=restrict_seed_lag_range,
     )

@@ -132,6 +132,55 @@ class WorkflowSmokeTests(unittest.TestCase):
         np.testing.assert_array_equal(state.observed_windows.left_sample, 17)
         np.testing.assert_array_equal(state.observed_windows.right_sample, 27)
 
+    def test_evaluator_prefers_bootstrap_windows_and_mask_when_present(self) -> None:
+        state, observed, synthetic = self._state_and_data()
+        bootstrap_mask = np.array([[[True, False, True]]])
+        state = replace(
+            state,
+            bootstrap_fixed_mask=bootstrap_mask,
+            bootstrap_target_windows=state.observed_windows,
+        )
+        _, result = WRTIObjectiveEvaluator(state, observed).evaluate(synthetic)
+        np.testing.assert_array_equal(result.fixed_mask, bootstrap_mask)
+        self.assertEqual(state.n_fixed, 3)
+        self.assertEqual(state.evaluation_n_fixed, 2)
+
+    def test_bootstrap_evaluator_does_not_require_legacy_qc(self) -> None:
+        state, observed, synthetic = self._state_and_data()
+        bootstrap_mask = np.array([[[True, False, True]]])
+        state = replace(
+            state,
+            fixed_mask=None,
+            reference_qc=None,
+            observed_windows=None,
+            bootstrap_fixed_mask=bootstrap_mask,
+            bootstrap_target_windows=state.observed_windows,
+        )
+        _, result = WRTIObjectiveEvaluator(state, observed).evaluate(synthetic)
+        np.testing.assert_array_equal(result.fixed_mask, bootstrap_mask)
+
+    def test_dual_center_evaluator_combines_coarse_and_local_shift(self) -> None:
+        state, observed, synthetic = self._state_and_data()
+        dual_config = replace(
+            state.config,
+            dual_center_enabled=True,
+            dual_center_local_max_shift_time=4.0,
+        )
+        dual_state = replace(state, config=dual_config)
+        delayed_synthetic = np.zeros_like(synthetic)
+        delayed_synthetic[..., 1:] = synthetic[..., :-1]
+        _, result = WRTIObjectiveEvaluator(dual_state, observed).evaluate(
+            delayed_synthetic,
+            candidate_eikonal_traveltime=np.full(state.shape, 20.0),
+        )
+
+        np.testing.assert_allclose(result.tobs, 22.0)
+        np.testing.assert_allclose(result.tsyn_theory, 20.0)
+        np.testing.assert_allclose(result.local_shift_time, 1.0, atol=0.05)
+        np.testing.assert_allclose(result.coarse_shift_time, 2.0)
+        np.testing.assert_allclose(result.tsyn_picked, 21.0, atol=0.05)
+        np.testing.assert_allclose(result.shift_time, 1.0, atol=0.05)
+
     def test_diagnostic_plot_is_written_after_evaluation(self) -> None:
         state, observed, synthetic = self._state_and_data()
         evaluator = WRTIObjectiveEvaluator(state, observed)

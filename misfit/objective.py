@@ -159,6 +159,12 @@ class MisfitResult:
     fallback_argmax_count: int = 0
     low_correlation_qc_count: int = 0
     boundary_qc_count: int = 0
+    tobs: np.ndarray | None = None
+    eikonal_traveltime: np.ndarray | None = None
+    tsyn_theory: np.ndarray | None = None
+    coarse_shift_time: np.ndarray | None = None
+    local_shift_time: np.ndarray | None = None
+    tsyn_picked: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         fixed_mask = np.asarray(self.fixed_mask, dtype=bool)
@@ -186,6 +192,22 @@ class MisfitResult:
         for name, value in arrays.items():
             if value.shape != shape:
                 raise MisfitError(f"{name} must have shape {shape}.")
+        optional_arrays = {}
+        for name in (
+            "tobs",
+            "eikonal_traveltime",
+            "tsyn_theory",
+            "coarse_shift_time",
+            "local_shift_time",
+            "tsyn_picked",
+        ):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            array = np.asarray(value, dtype=float)
+            if array.shape != shape:
+                raise MisfitError(f"{name} must have shape {shape}.")
+            optional_arrays[name] = array
         if not np.isfinite(self.misfit_sum) or self.misfit_sum < 0:
             raise MisfitError("misfit_sum must be finite and non-negative.")
         if (
@@ -237,6 +259,8 @@ class MisfitResult:
         object.__setattr__(self, "misfit_sum", float(self.misfit_sum))
         for name, value in arrays.items():
             object.__setattr__(self, name, _readonly(value, value.dtype))
+        for name, value in optional_arrays.items():
+            object.__setattr__(self, name, _readonly(value, float))
         object.__setattr__(self, "fixed_mask", _readonly(fixed_mask, bool))
         object.__setattr__(self, "failure_count", int(self.failure_count))
         for name in (
@@ -336,6 +360,12 @@ def compute_vfsa_misfit(
     fallback_local_mask: np.ndarray | None = None,
     fallback_global_mask: np.ndarray | None = None,
     fallback_argmax_mask: np.ndarray | None = None,
+    tobs: np.ndarray | None = None,
+    eikonal_traveltime: np.ndarray | None = None,
+    tsyn_theory: np.ndarray | None = None,
+    coarse_shift_time: np.ndarray | None = None,
+    local_shift_time: np.ndarray | None = None,
+    tsyn_picked: np.ndarray | None = None,
 ) -> MisfitResult:
     """Evaluate the fixed-mask sum traveltime-square objective.
 
@@ -435,6 +465,12 @@ def compute_vfsa_misfit(
         fallback_argmax_count=int(np.count_nonzero(fallback_argmax)),
         low_correlation_qc_count=int(np.count_nonzero(low_correlation_qc)),
         boundary_qc_count=int(np.count_nonzero(boundary_qc)),
+        tobs=tobs,
+        eikonal_traveltime=eikonal_traveltime,
+        tsyn_theory=tsyn_theory,
+        coarse_shift_time=coarse_shift_time,
+        local_shift_time=local_shift_time,
+        tsyn_picked=tsyn_picked,
     )
 
 

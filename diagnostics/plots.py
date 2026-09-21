@@ -229,6 +229,7 @@ def save_vfsa_diagnostic(
     path_failure_mask_array=None,
     low_correlation_qc_mask_array=None,
     boundary_qc_mask_array=None,
+    total_shift_time_array=None,
     shot: int | None = None,
     dpi: int = 180,
 ):
@@ -256,6 +257,11 @@ def save_vfsa_diagnostic(
         low_correlation_qc_mask_array,
         boundary_qc_mask_array,
     )
+    total_shift = None
+    if total_shift_time_array is not None:
+        total_shift = np.asarray(total_shift_time_array, dtype=float)
+        if total_shift.shape != reference_state.shape:
+            raise ValueError("total_shift_time_array must match reference_state.shape.")
     if any(value is not None for value in supplied_masks):
         if not all(value is not None for value in supplied_masks):
             raise ValueError(
@@ -285,7 +291,7 @@ def save_vfsa_diagnostic(
 
     receiver_x = np.asarray(reference_state.receiver_coordinates[shot, :, 0]) / 1000.0
     time = reference_state.windows.t0 + np.arange(reference_state.windows.nt) * reference_state.windows.dt
-    if reference_state.observed_windows is None:
+    if reference_state.evaluation_observed_windows is None:
         raise ValueError("reference_state has no observed_windows.")
     colors = ("#0072B2", "#D55E00", "#009E73", "#CC79A7")
     recovered_all = np.asarray(reference_state.recovered_mask, dtype=bool)
@@ -306,14 +312,14 @@ def save_vfsa_diagnostic(
         for reflector in range(nref):
             color = colors[reflector % len(colors)]
             reference_center = reference_state.windows.center_time[reflector, shot]
-            valid = reference_state.observed_windows.valid[reflector, shot]
-            center = reference_state.observed_windows.center_time[reflector, shot]
+            valid = reference_state.evaluation_observed_windows.valid[reflector, shot]
+            center = reference_state.evaluation_observed_windows.center_time[reflector, shot]
             good = valid & np.isfinite(center)
             recovered = recovered_all[reflector, shot]
             direct = center_source[reflector, shot] == DIRECT_TRACKING
             reference_good = np.isfinite(reference_center)
             if role == "observed":
-                half = reference_state.observed_windows.half_window_time[reflector]
+                half = reference_state.evaluation_observed_windows.half_window_time[reflector]
                 ax.fill_between(
                     receiver_x,
                     center - half,
@@ -347,12 +353,17 @@ def save_vfsa_diagnostic(
                 continue
             _, tracking = item
             raw_shift = np.asarray(tracking.shift_time, dtype=float)
+            plotted_shift = (
+                raw_shift
+                if total_shift is None
+                else total_shift[reflector, shot]
+            )
             success = tracking.success_mask & np.isfinite(raw_shift) & good
             candidate_failure = _candidate_failure_mask(
                 tracking,
                 reference_state.config.misfit.candidate_boundary_policy,
             )
-            failed = reference_state.fixed_mask[reflector, shot] & candidate_failure
+            failed = reference_state.evaluation_fixed_mask[reflector, shot] & candidate_failure
 
             if role == "observed":
                 ax.plot(receiver_x[good], center[good], color=color, lw=1.1)
@@ -368,7 +379,7 @@ def save_vfsa_diagnostic(
             else:
                 # shift_time = T_obs - T_syn, so candidate synthetic events
                 # lie at fixed_observed_center - tracked_shift.
-                plotted = np.where(success, center - raw_shift, np.nan)
+                plotted = np.where(success, center - plotted_shift, np.nan)
                 ax.plot(receiver_x, plotted, color=color, lw=1.2)
 
             if role == "candidate":
@@ -517,22 +528,27 @@ def save_vfsa_diagnostic(
             continue
         _, tracking = item
         color = colors[reflector % len(colors)]
-        success = tracking.success_mask & np.isfinite(tracking.shift_time)
+        residual_shift = (
+            np.asarray(tracking.shift_time, dtype=float)
+            if total_shift is None
+            else total_shift[reflector, shot]
+        )
+        success = tracking.success_mask & np.isfinite(residual_shift)
         candidate_failure = _candidate_failure_mask(
             tracking,
             reference_state.config.misfit.candidate_boundary_policy,
         )
-        included = reference_state.fixed_mask[reflector, shot] & ~candidate_failure
+        included = reference_state.evaluation_fixed_mask[reflector, shot] & ~candidate_failure
         residual_ax.plot(
             receiver_x,
-            np.where(success, tracking.shift_time * 1000.0, np.nan),
+            np.where(success, residual_shift * 1000.0, np.nan),
             color=color,
             lw=1.1,
             label=f"R{reflector + 1}",
         )
         residual_ax.scatter(
             receiver_x[included][::5],
-            tracking.shift_time[included][::5] * 1000.0,
+            residual_shift[included][::5] * 1000.0,
             color=color,
             s=7,
         )
@@ -564,7 +580,7 @@ def save_vfsa_diagnostic(
     quality_ax.set_title("Tracking quality")
     quality_ax.legend(ncol=5, fontsize=7, frameon=False)
 
-    fixed_count = int(np.count_nonzero(reference_state.fixed_mask[:, shot]))
+    fixed_count = int(np.count_nonzero(reference_state.evaluation_fixed_mask[:, shot]))
     shot_recovered_count = int(np.count_nonzero(recovered_all[:, shot]))
     shot_failure_count = 0
     shot_low_corr_count = 0
@@ -575,7 +591,7 @@ def save_vfsa_diagnostic(
         if item is None:
             continue
         _, tracking = item
-        fixed = reference_state.fixed_mask[reflector, shot]
+        fixed = reference_state.evaluation_fixed_mask[reflector, shot]
         if path_failure_mask_array is None:
             path_mask = path_failure_mask(tracking)
             low_mask = low_correlation_qc_mask(
@@ -633,6 +649,7 @@ def save_vfsa_diagnostics(
     path_failure_mask_array=None,
     low_correlation_qc_mask_array=None,
     boundary_qc_mask_array=None,
+    total_shift_time_array=None,
     shots=None,
     dpi: int = 180,
 ):
@@ -667,6 +684,7 @@ def save_vfsa_diagnostics(
                 path_failure_mask_array=path_failure_mask_array,
                 low_correlation_qc_mask_array=low_correlation_qc_mask_array,
                 boundary_qc_mask_array=boundary_qc_mask_array,
+                total_shift_time_array=total_shift_time_array,
                 shot=shot,
                 dpi=dpi,
             )

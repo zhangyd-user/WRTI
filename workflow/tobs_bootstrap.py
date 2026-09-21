@@ -27,9 +27,37 @@ import numpy as np
 from scipy.ndimage import maximum_filter1d
 from scipy.signal import find_peaks, hilbert
 
+from ..window import WindowResult, build_window_result
+
 
 class TobsBootstrapError(ValueError):
     """Raised when ASCRT-style observed-center bootstrap inputs are invalid."""
+
+
+def build_bootstrap_fixed_mask(
+    tobs_fixed: np.ndarray,
+    *,
+    dt: float,
+    t0: float,
+    nt: int,
+    half_window_time,
+    window_type: str,
+    tukey_alpha: float,
+) -> tuple[np.ndarray, WindowResult]:
+    """Build an independent receiver-level mask for final bootstrap centers."""
+
+    tobs = np.asarray(tobs_fixed, dtype=float)
+    target_windows = build_window_result(
+        tobs,
+        dt=dt,
+        t0=t0,
+        nt=nt,
+        half_window_time=half_window_time,
+        window_type=window_type,
+        tukey_alpha=tukey_alpha,
+        max_lag_samples=0,
+    )
+    return np.isfinite(tobs) & target_windows.valid, target_windows
 
 
 def _readonly(value: np.ndarray, dtype: np.dtype | type) -> np.ndarray:
@@ -1569,6 +1597,7 @@ __all__ = [
     "FlatEventTrackingResult",
     "ObservedCenterBootstrapResult",
     "TobsBootstrapError",
+    "build_bootstrap_fixed_mask",
     "build_observed_centers_from_eikonal",
     "flatten_observed_gather",
     "nearest_offset_receiver",

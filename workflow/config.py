@@ -119,6 +119,10 @@ class WRTIConfig:
     flat_compute_legacy_dense_diagnostic: bool = False
     flat_legacy_dense_diagnostic_shots: tuple[int, ...] = ()
     quality_audit: QualityAuditConfig = field(default_factory=QualityAuditConfig)
+    dual_center_enabled: bool = False
+    dual_center_use_candidate_eikonal: bool = True
+    dual_center_local_max_shift_time: float = 0.100
+    dual_center_archive_each_evaluation: bool = True
 
     def __post_init__(self) -> None:
         if self.window_type not in {"rectangular", "tukey"}:
@@ -176,6 +180,27 @@ class WRTIConfig:
             )
         if not isinstance(self.use_envelope_coarse, (bool, np.bool_)):
             raise WorkflowConfigError("correlation.use_envelope_coarse must be boolean.")
+        if not isinstance(self.dual_center_enabled, (bool, np.bool_)):
+            raise WorkflowConfigError("dual_center_windows.enabled must be boolean.")
+        if not isinstance(
+            self.dual_center_use_candidate_eikonal, (bool, np.bool_)
+        ):
+            raise WorkflowConfigError(
+                "dual_center_windows.use_candidate_eikonal must be boolean."
+            )
+        if not isinstance(
+            self.dual_center_archive_each_evaluation, (bool, np.bool_)
+        ):
+            raise WorkflowConfigError(
+                "dual_center_windows.archive_each_evaluation must be boolean."
+            )
+        if (
+            not np.isfinite(self.dual_center_local_max_shift_time)
+            or self.dual_center_local_max_shift_time < 0
+        ):
+            raise WorkflowConfigError(
+                "dual_center_windows.local_max_shift_time must be finite and non-negative."
+            )
         if (
             not np.isfinite(self.envelope_fine_half_width_time)
             or self.envelope_fine_half_width_time < 0
@@ -280,6 +305,22 @@ class WRTIConfig:
         object.__setattr__(self, "eikonal_workers", int(self.eikonal_workers))
         object.__setattr__(self, "wrti_workers", int(self.wrti_workers))
         object.__setattr__(self, "use_envelope_coarse", bool(self.use_envelope_coarse))
+        object.__setattr__(self, "dual_center_enabled", bool(self.dual_center_enabled))
+        object.__setattr__(
+            self,
+            "dual_center_use_candidate_eikonal",
+            bool(self.dual_center_use_candidate_eikonal),
+        )
+        object.__setattr__(
+            self,
+            "dual_center_local_max_shift_time",
+            float(self.dual_center_local_max_shift_time),
+        )
+        object.__setattr__(
+            self,
+            "dual_center_archive_each_evaluation",
+            bool(self.dual_center_archive_each_evaluation),
+        )
         object.__setattr__(
             self,
             "envelope_fine_half_width_time",
@@ -351,6 +392,9 @@ class WRTIConfig:
         quality_audit = root.get("quality_audit", {})
         if not isinstance(quality_audit, Mapping):
             raise WorkflowConfigError("quality_audit must be a mapping.")
+        dual_center = root.get("dual_center_windows", {})
+        if not isinstance(dual_center, Mapping):
+            raise WorkflowConfigError("dual_center_windows must be a mapping.")
         qc = root["qc"]
         eikonal = root.get("eikonal", {})
         parallel = root.get("parallel", {})
@@ -465,6 +509,16 @@ class WRTIConfig:
             diagnostics_output_dir=str(diagnostics.get("output_dir", "")),
             log_level=str(logging.get("log_level", "INFO")),
             verbose=bool(logging.get("verbose", False)),
+            dual_center_enabled=dual_center.get("enabled", False),
+            dual_center_use_candidate_eikonal=dual_center.get(
+                "use_candidate_eikonal", True
+            ),
+            dual_center_local_max_shift_time=dual_center.get(
+                "local_max_shift_time", 0.100
+            ),
+            dual_center_archive_each_evaluation=dual_center.get(
+                "archive_each_evaluation", True
+            ),
         )
 
     @classmethod

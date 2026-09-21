@@ -52,6 +52,8 @@ class WRTIReferenceState:
         default_factory=dict
     )
     observed_center_source: np.ndarray | None = None
+    bootstrap_fixed_mask: np.ndarray | None = None
+    bootstrap_target_windows: WindowResult | None = None
 
     def __post_init__(self) -> None:
         if not self.reflectors:
@@ -76,6 +78,13 @@ class WRTIReferenceState:
         if self.observed_windows is not None and self.observed_windows.shape != traveltime.shape:
             raise ReferenceStateError(
                 "observed_windows and reflection_traveltime shapes must match."
+            )
+        if (
+            self.bootstrap_target_windows is not None
+            and self.bootstrap_target_windows.shape != traveltime.shape
+        ):
+            raise ReferenceStateError(
+                "bootstrap_target_windows and reflection_traveltime shapes must match."
             )
         source = np.asarray(self.source_coordinates, dtype=float)
         receiver = np.asarray(self.receiver_coordinates, dtype=float)
@@ -114,6 +123,14 @@ class WRTIReferenceState:
                 raise ReferenceStateError("fixed_mask must match [nref, ns, nr].")
         else:
             fixed = None
+        if self.bootstrap_fixed_mask is not None:
+            bootstrap_fixed = np.asarray(self.bootstrap_fixed_mask, dtype=bool)
+            if bootstrap_fixed.shape != traveltime.shape:
+                raise ReferenceStateError(
+                    "bootstrap_fixed_mask must match [nref, ns, nr]."
+                )
+        else:
+            bootstrap_fixed = None
         if self.reference_qc is not None:
             if fixed is None or self.reference_qc.fixed_mask.shape != traveltime.shape:
                 raise ReferenceStateError("reference_qc must match fixed_mask shape.")
@@ -144,6 +161,11 @@ class WRTIReferenceState:
         object.__setattr__(self, "fixed_mask", None if fixed is None else _readonly(fixed, bool))
         object.__setattr__(
             self,
+            "bootstrap_fixed_mask",
+            None if bootstrap_fixed is None else _readonly(bootstrap_fixed, bool),
+        )
+        object.__setattr__(
+            self,
             "reference_shift_time",
             None if reference_shift is None else _readonly(reference_shift, float),
         )
@@ -165,6 +187,31 @@ class WRTIReferenceState:
     @property
     def n_fixed(self) -> int:
         return 0 if self.fixed_mask is None else int(np.count_nonzero(self.fixed_mask))
+
+    @property
+    def evaluation_fixed_mask(self) -> np.ndarray | None:
+        """Mask selected for candidate evaluation; bootstrap wins when present."""
+
+        return (
+            self.bootstrap_fixed_mask
+            if self.bootstrap_fixed_mask is not None
+            else self.fixed_mask
+        )
+
+    @property
+    def evaluation_observed_windows(self) -> WindowResult | None:
+        """Observed Tobs windows selected for candidate evaluation."""
+
+        return (
+            self.bootstrap_target_windows
+            if self.bootstrap_target_windows is not None
+            else self.observed_windows
+        )
+
+    @property
+    def evaluation_n_fixed(self) -> int:
+        mask = self.evaluation_fixed_mask
+        return 0 if mask is None else int(np.count_nonzero(mask))
 
     @property
     def window_invalid_count(self) -> int:

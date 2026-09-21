@@ -689,10 +689,21 @@ def _compute_for_one_shot(
     tracking_agc_fraction: float = 0.25,
     tracking_agc_floor_ratio: float = 0.20,
     tracking_receiver_stack: bool = True,
+    synthetic_window_result: WindowResult | None = None,
 ) -> CorrelationResult:
     nref, ns, nr = window_result.shape
     if not (0 <= reflector < nref and 0 <= shot < ns):
         raise IndexError("reflector or shot index is out of range.")
+    dual_center = synthetic_window_result is not None
+    synthetic_windows = synthetic_window_result or window_result
+    if synthetic_windows.shape != window_result.shape:
+        raise CorrelationError(
+            "synthetic_window_result must match window_result.shape."
+        )
+    if dual_center and fixed_side != "observed":
+        raise CorrelationError(
+            "dual-center ZNCC requires fixed_side='observed'."
+        )
 
     lags_samples = np.arange(
         -max_lag_samples, max_lag_samples + 1, dtype=int
@@ -754,9 +765,9 @@ def _compute_for_one_shot(
         center_times,
         reflector,
         max_lag_samples * float(dt),
-        lags_time if fixed_side == "synthetic" else -lags_time,
+        lags_time if dual_center or fixed_side == "synthetic" else -lags_time,
     )
-    if fixed_side == "observed":
+    if fixed_side == "observed" and not dual_center:
         # Candidate synthetic time is center - lag, so convert the
         # observed-center ownership bounds back to the public lag axis.
         ownership_min, ownership_max = -ownership_max, -ownership_min
@@ -793,16 +804,26 @@ def _compute_for_one_shot(
         raise CorrelationError("source_x must be finite.")
 
     for receiver in range(nr):
-        if not bool(window_result.valid[reflector, shot, receiver]):
+        if not (
+            bool(window_result.valid[reflector, shot, receiver])
+            and bool(synthetic_windows.valid[reflector, shot, receiver])
+        ):
             continue
 
         left = int(window_result.left_sample[reflector, shot, receiver])
         right = int(window_result.right_sample[reflector, shot, receiver])
+        synthetic_left = int(
+            synthetic_windows.left_sample[reflector, shot, receiver]
+        )
+        synthetic_right = int(
+            synthetic_windows.right_sample[reflector, shot, receiver]
+        )
         length = right - left + 1
         if (
             length <= 0
-            or left - max_lag_samples < 0
-            or right + max_lag_samples >= window_result.nt
+            or synthetic_right - synthetic_left + 1 != length
+            or synthetic_left - max_lag_samples < 0
+            or synthetic_right + max_lag_samples >= window_result.nt
         ):
             continue
 
@@ -819,7 +840,11 @@ def _compute_for_one_shot(
         shifted_trace = (
             observed[shot, receiver] if fixed_side == "synthetic" else synthetic[shot, receiver]
         )
-        fixed_target = fixed_trace[left : right + 1]
+        fixed_target_left = synthetic_left if fixed_side == "synthetic" else left
+        shifted_target_left = left if fixed_side == "synthetic" else synthetic_left
+        fixed_target = fixed_trace[
+            fixed_target_left : fixed_target_left + length
+        ]
         fixed_mean = float(
             np.sum(local_weights * fixed_target) / weight_sum
         )
@@ -861,10 +886,14 @@ def _compute_for_one_shot(
             )
             envelope_corr, _, _ = _weighted_zncc_lags(
                 shifted_envelope,
-                fixed_envelope[left : right + 1],
+                fixed_envelope[
+                    fixed_target_left : fixed_target_left + length
+                ],
                 local_weights,
-                left,
-                lags_samples if fixed_side == "synthetic" else -lags_samples,
+                shifted_target_left,
+                lags_samples
+                if dual_center or fixed_side == "synthetic"
+                else -lags_samples,
             )
             envelope_correlation[receiver] = envelope_corr
 
@@ -875,8 +904,10 @@ def _compute_for_one_shot(
             shifted_trace,
             fixed_target,
             local_weights,
-            left,
-            lags_samples if fixed_side == "synthetic" else -lags_samples,
+            shifted_target_left,
+            lags_samples
+            if dual_center or fixed_side == "synthetic"
+            else -lags_samples,
         )
         waveform_correlation[receiver] = waveform_corr
         if fixed_side == "synthetic":
@@ -900,11 +931,32 @@ def _compute_for_one_shot(
                 max_lag_samples,
                 observed.shape[-1],
             )
+            if dual_center:
+                tracking_valid &= _tracking_common_buffer_valid(
+                    synthetic_windows,
+                    reflector,
+                    shot,
+                    valid,
+                    max_lag_samples,
+                    synthetic.shape[-1],
+                )
             if np.any(tracking_valid):
-                observed_local, synthetic_local, target_left = _tracking_local_buffers(
+                observed_local, _, observed_target_left = _tracking_local_buffers(
                     observed[shot],
-                    synthetic[shot],
+                    observed[shot],
                     window_result,
+                    reflector,
+                    shot,
+                    tracking_valid,
+                    max_lag_samples,
+                )
+                synthetic_buffer_windows = (
+                    synthetic_windows if dual_center else window_result
+                )
+                _, synthetic_local, synthetic_target_left = _tracking_local_buffers(
+                    synthetic[shot],
+                    synthetic[shot],
+                    synthetic_buffer_windows,
                     reflector,
                     shot,
                     tracking_valid,
@@ -943,16 +995,25 @@ def _compute_for_one_shot(
                         if fixed_side == "synthetic"
                         else synthetic_tracking[receiver]
                     )
+                    fixed_start = int(
+                        synthetic_target_left[receiver]
+                        if fixed_side == "synthetic"
+                        else observed_target_left[receiver]
+                    )
+                    shifted_start = int(
+                        observed_target_left[receiver]
+                        if fixed_side == "synthetic"
+                        else synthetic_target_left[receiver]
+                    )
                     tracking_correlation[receiver], _, _ = _weighted_zncc_lags(
                         shifted_tracking,
-                        fixed_tracking[
-                            target_left[receiver] : target_left[receiver] + right - left + 1
-                        ],
+                        fixed_tracking[fixed_start : fixed_start + right - left + 1],
                         local_weights,
-                        target_left[receiver],
-                        lags_samples if fixed_side == "synthetic" else -lags_samples,
+                        shifted_start,
+                        lags_samples
+                        if dual_center or fixed_side == "synthetic"
+                        else -lags_samples,
                     )
-
     if use_envelope_coarse:
         (
             coarse_path,
@@ -972,7 +1033,9 @@ def _compute_for_one_shot(
             coarse_search_center_samples * float(dt)
         )
         coarse_success = coarse_path >= 0
-        coarse_lag_samples[coarse_success] = lags_samples[coarse_path[coarse_success]]
+        coarse_lag_samples[coarse_success] = lags_samples[
+            coarse_path[coarse_success]
+        ]
         coarse_lag_time[coarse_success] = (
             coarse_lag_samples[coarse_success] * float(dt)
         )
@@ -980,10 +1043,23 @@ def _compute_for_one_shot(
         coarse_peak[receivers] = envelope_correlation[
             receivers, coarse_path[receivers]
         ]
-        fine_allowed = ownership_allowed & coarse_success[:, None] & (
-            np.abs(lags_samples[None, :] - coarse_lag_samples[:, None])
-            <= fine_half_width_samples
-        )
+
+        if dual_center:
+            # Candidate / dual-center stage:
+            # Eikonal has already localized the event to the local +/- lag window.
+            # Keep envelope coarse tracking for diagnostics, but do NOT use it as
+            # a hard waveform-ZNCC mask.  The waveform DP can see the complete
+            # ownership-valid local lag interval.
+            fine_allowed = ownership_allowed & valid[:, None]
+        else:
+            # Reference / Tobs construction keeps the original coarse-guided mask.
+            fine_allowed = ownership_allowed & coarse_success[:, None] & (
+                np.abs(
+                    lags_samples[None, :]
+                    - coarse_lag_samples[:, None]
+                )
+                <= fine_half_width_samples
+            )
     else:
         fine_allowed = ownership_allowed & valid[:, None]
 
@@ -1037,6 +1113,7 @@ def compute_zncc(
     tracking_agc_fraction: float = 0.25,
     tracking_agc_floor_ratio: float = 0.20,
     tracking_receiver_stack: bool = True,
+    synthetic_window_result: WindowResult | None = None,
 ) -> CorrelationResult:
     """Compute fixed-window ZNCC for one reflector and one shot.
 
@@ -1053,6 +1130,8 @@ def compute_zncc(
     obs, syn = _prepare_data(
         observed, synthetic, window_result, preprocess_hook
     )
+    if synthetic_window_result is not None:
+        _validate_data(observed, synthetic, synthetic_window_result)
     ownership_centers = None
     if ownership_center_time is not None:
         ownership_centers = np.asarray(ownership_center_time, dtype=float)
@@ -1061,6 +1140,8 @@ def compute_zncc(
                 "ownership_center_time must have the same shape as window centers."
             )
     max_lag_samples = _normalise_max_lag(max_lag_time, dt, window_result)
+    if synthetic_window_result is not None:
+        _normalise_max_lag(max_lag_time, dt, synthetic_window_result)
     observed_envelope = (
         np.abs(hilbert(obs[shot], axis=-1)) if use_envelope_coarse else None
     )
@@ -1091,6 +1172,7 @@ def compute_zncc(
         tracking_agc_fraction=tracking_agc_fraction,
         tracking_agc_floor_ratio=tracking_agc_floor_ratio,
         tracking_receiver_stack=tracking_receiver_stack,
+        synthetic_window_result=synthetic_window_result,
     )
 
 
@@ -1116,6 +1198,7 @@ def iter_zncc(
     tracking_agc_fraction: float = 0.25,
     tracking_agc_floor_ratio: float = 0.20,
     tracking_receiver_stack: bool = True,
+    synthetic_window_result: WindowResult | None = None,
 ) -> Iterator[tuple[int, int, CorrelationResult]]:
     """Yield one ``CorrelationResult`` at a time for bounded memory use."""
 
@@ -1124,6 +1207,8 @@ def iter_zncc(
     obs, syn = _prepare_data(
         observed, synthetic, window_result, preprocess_hook
     )
+    if synthetic_window_result is not None:
+        _validate_data(observed, synthetic, synthetic_window_result)
     ownership_centers = None
     if ownership_center_time is not None:
         ownership_centers = np.asarray(ownership_center_time, dtype=float)
@@ -1132,6 +1217,8 @@ def iter_zncc(
                 "ownership_center_time must have the same shape as window centers."
             )
     max_lag_samples = _normalise_max_lag(max_lag_time, dt, window_result)
+    if synthetic_window_result is not None:
+        _normalise_max_lag(max_lag_time, dt, synthetic_window_result)
     nref, ns, _ = window_result.shape
     reflector_indices = range(nref) if reflectors is None else reflectors
     shot_indices = range(ns) if shots is None else shots
@@ -1177,6 +1264,7 @@ def iter_zncc(
                 tracking_agc_fraction=tracking_agc_fraction,
                 tracking_agc_floor_ratio=tracking_agc_floor_ratio,
                 tracking_receiver_stack=tracking_receiver_stack,
+                synthetic_window_result=synthetic_window_result,
             )
 
 

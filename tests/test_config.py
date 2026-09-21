@@ -24,6 +24,20 @@ def _mapping(parallel=None):
 
 
 class ParallelConfigTests(unittest.TestCase):
+    def test_dual_center_settings_are_read(self) -> None:
+        mapping = _mapping()
+        mapping["dual_center_windows"] = {
+            "enabled": True,
+            "use_candidate_eikonal": True,
+            "local_max_shift_time": 0.100,
+            "archive_each_evaluation": True,
+        }
+        config = WRTIConfig.from_mapping(mapping)
+        self.assertTrue(config.dual_center_enabled)
+        self.assertTrue(config.dual_center_use_candidate_eikonal)
+        self.assertEqual(config.dual_center_local_max_shift_time, 0.100)
+        self.assertTrue(config.dual_center_archive_each_evaluation)
+
     def test_unified_parallel_defaults_are_sixteen(self) -> None:
         config = WRTIConfig.from_mapping(_mapping())
         self.assertEqual(config.eikonal_workers, 16)

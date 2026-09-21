@@ -1,7 +1,69 @@
 import numpy as np
 import WRTI.workflow.tobs_bootstrap as bootstrap_module
 
-from WRTI.workflow.tobs_bootstrap import _ownership_corridors, snap_control_to_observed_peak
+from WRTI.workflow.tobs_bootstrap import (
+    _ownership_corridors,
+    build_bootstrap_fixed_mask,
+    snap_control_to_observed_peak,
+)
+
+
+def _bootstrap_mask(tobs):
+    return build_bootstrap_fixed_mask(
+        np.asarray(tobs, dtype=float),
+        dt=0.01,
+        t0=0.0,
+        nt=31,
+        half_window_time=0.05,
+        window_type="rectangular",
+        tukey_alpha=0.5,
+    )
+
+
+def test_bootstrap_mask_removes_only_one_missing_receiver():
+    tobs = np.full((3, 2, 81), 0.15)
+    tobs[2, 1, 80] = np.nan
+    fixed, _ = _bootstrap_mask(tobs)
+    assert not fixed[2, 1, 80]
+    assert fixed[2, 1, 79]
+    assert fixed[1, 1, 80]
+
+
+def test_bootstrap_mask_keeps_finite_prefix_of_unrecoverable_rkshot():
+    tobs = np.full((1, 1, 10), 0.15)
+    tobs[0, 0, 5:] = np.nan
+    fixed, _ = _bootstrap_mask(tobs)
+    np.testing.assert_array_equal(fixed[0, 0], [True] * 5 + [False] * 5)
+
+
+def test_bootstrap_mask_keeps_finite_repaired_receiver():
+    fixed, _ = _bootstrap_mask([[[0.15]]])
+    assert fixed[0, 0, 0]
+
+
+def test_bootstrap_mask_rejects_incomplete_target_window():
+    fixed, _ = _bootstrap_mask([[[0.04]]])
+    assert not fixed[0, 0, 0]
+
+
+def test_bootstrap_mask_does_not_reserve_candidate_lag_margin():
+    fixed, windows = _bootstrap_mask([[[0.06]]])
+    assert windows.max_lag_samples == 0
+    assert fixed[0, 0, 0]
+
+
+def test_bootstrap_mask_does_not_modify_legacy_mask():
+    legacy = np.array([[[False, True]]])
+    before = legacy.copy()
+    _bootstrap_mask([[[0.15, 0.15]]])
+    np.testing.assert_array_equal(legacy, before)
+
+
+def test_bootstrap_mask_is_independent_of_legacy_false_slot():
+    legacy = np.array([[[False]]])
+    bootstrap, _ = _bootstrap_mask([[[0.15]]])
+    assert not legacy[0, 0, 0]
+    assert bootstrap[0, 0, 0]
 
 
 def test_ownership_corridors_keep_edge_ids_and_report_order_violation():

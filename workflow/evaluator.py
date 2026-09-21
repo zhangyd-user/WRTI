@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 from types import MappingProxyType
 
@@ -10,6 +11,7 @@ import numpy as np
 from ..correlation import CorrelationResult, PreprocessHook
 from ..misfit import MisfitError, MisfitResult, compute_vfsa_misfit
 from ..tracking import TrackingResult
+from ..window import WindowResult, build_window_result
 
 from .parallel import ShotTrackingTask, run_shot_tasks, slice_windows_for_shot
 from .state import WRTIReferenceState
@@ -17,6 +19,51 @@ from .state import WRTIReferenceState
 
 class EvaluatorError(RuntimeError):
     """Raised when a candidate cannot be evaluated against the frozen state."""
+
+
+def _paired_dual_center_windows(
+    observed_windows: WindowResult,
+    tsyn_theory: np.ndarray,
+    max_lag_time: float,
+) -> tuple[WindowResult, WindowResult]:
+    """Build equal-length observed/synthetic windows around independent centers."""
+
+    observed = build_window_result(
+        observed_windows.center_time,
+        observed_windows.dt,
+        observed_windows.t0,
+        observed_windows.nt,
+        observed_windows.half_window_time,
+        window_type=observed_windows.window_type,
+        tukey_alpha=observed_windows.tukey_alpha,
+        max_lag_time=max_lag_time,
+    )
+    synthetic = build_window_result(
+        tsyn_theory,
+        observed_windows.dt,
+        observed_windows.t0,
+        observed_windows.nt,
+        observed_windows.half_window_time,
+        window_type=observed_windows.window_type,
+        tukey_alpha=observed_windows.tukey_alpha,
+        max_lag_time=max_lag_time,
+    )
+    left_offset = observed.left_sample - observed.center_sample
+    right_offset = observed.right_sample - observed.center_sample
+    left = synthetic.center_sample + left_offset
+    right = synthetic.center_sample + right_offset
+    valid = (
+        observed.valid
+        & np.isfinite(tsyn_theory)
+        & (left >= synthetic.max_lag_samples)
+        & (right + synthetic.max_lag_samples < synthetic.nt)
+    )
+    return observed, replace(
+        synthetic,
+        left_sample=left,
+        right_sample=right,
+        valid=valid,
+    )
 
 
 class WRTIObjectiveEvaluator:
@@ -30,12 +77,11 @@ class WRTIObjectiveEvaluator:
         preprocess_hook: PreprocessHook | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
-        if reference_state.fixed_mask is None or reference_state.reference_qc is None:
+        if reference_state.evaluation_fixed_mask is None:
             raise EvaluatorError(
-                "WRTIReferenceState has no fixed_mask; build it with observed_data "
-                "and reference_synthetic_data before creating the evaluator."
+                "WRTIReferenceState has no fixed mask for candidate evaluation."
             )
-        if reference_state.observed_windows is None:
+        if reference_state.evaluation_observed_windows is None:
             raise EvaluatorError(
                 "WRTIReferenceState has no observed_windows; rebuild the reference "
                 "state with observed_data and reference_synthetic_data."
@@ -68,7 +114,11 @@ class WRTIObjectiveEvaluator:
     def observed_data(self) -> np.ndarray:
         return self._observed_data
 
-    def evaluate(self, candidate_synthetic: np.ndarray) -> tuple[float, MisfitResult]:
+    def evaluate(
+        self,
+        candidate_synthetic: np.ndarray,
+        candidate_eikonal_traveltime: np.ndarray | None = None,
+    ) -> tuple[float, MisfitResult]:
         """Run only fixed-window ZNCC, tracking, and fixed-mask misfit."""
 
         candidate = np.asarray(candidate_synthetic, dtype=float)
@@ -82,6 +132,37 @@ class WRTIObjectiveEvaluator:
 
         state = self._reference_state
         nref, ns, nr = state.shape
+        dual_center = state.config.dual_center_enabled
+        eikonal_traveltime = None
+        tsyn_theory = None
+        synthetic_windows = None
+        observed_windows = state.evaluation_observed_windows
+        evaluation_fixed_mask = state.evaluation_fixed_mask
+        max_lag_time = state.config.max_lag_time
+        ownership_center_time = None
+        if dual_center:
+            if (
+                not state.config.dual_center_use_candidate_eikonal
+                or candidate_eikonal_traveltime is None
+            ):
+                raise EvaluatorError(
+                    "dual-center evaluation requires candidate Eikonal traveltimes."
+                )
+            eikonal_traveltime = np.asarray(
+                candidate_eikonal_traveltime, dtype=float
+            )
+            if eikonal_traveltime.shape != state.shape:
+                raise EvaluatorError(
+                    "candidate_eikonal_traveltime must match reference_state.shape."
+                )
+            tsyn_theory = eikonal_traveltime + state.config.center_time_shift
+            max_lag_time = state.config.dual_center_local_max_shift_time
+            observed_windows, synthetic_windows = _paired_dual_center_windows(
+                observed_windows,
+                tsyn_theory,
+                max_lag_time,
+            )
+            ownership_center_time = tsyn_theory
         shift_time = np.full((nref, ns, nr), np.nan, dtype=float)
         tracked_correlation = np.full((nref, ns, nr), np.nan, dtype=float)
         energy_obs = np.full((nref, ns, nr), np.nan, dtype=float)
@@ -95,18 +176,19 @@ class WRTIObjectiveEvaluator:
         # The candidate window uses observed centers.  Ownership needs a
         # complete neighboring-center field, so fill only missing observed
         # centers from the original theoretical/reference windows.
-        ownership_center_time = np.array(
-            state.observed_windows.center_time,
-            dtype=float,
-            copy=True,
-        )
-        missing_ownership_centers = (
-            ~state.observed_windows.valid
-            | ~np.isfinite(ownership_center_time)
-        )
-        ownership_center_time[missing_ownership_centers] = state.windows.center_time[
-            missing_ownership_centers
-        ]
+        if ownership_center_time is None:
+            ownership_center_time = np.array(
+                observed_windows.center_time,
+                dtype=float,
+                copy=True,
+            )
+            missing_ownership_centers = (
+                ~observed_windows.valid
+                | ~np.isfinite(ownership_center_time)
+            )
+            ownership_center_time[missing_ownership_centers] = state.windows.center_time[
+                missing_ownership_centers
+            ]
         # Retain five acquisition shots, evenly distributed from the first
         # to the last shot, for one PNG diagnostic per VFSA evaluation.
         diagnostic_shots = np.rint(
@@ -125,12 +207,19 @@ class WRTIObjectiveEvaluator:
                 shot_index=shot,
                 observed_shot=self._observed_data[shot],
                 synthetic_shot=candidate[shot],
-                windows=slice_windows_for_shot(state.observed_windows, shot),
+                windows=slice_windows_for_shot(observed_windows, shot),
+                synthetic_windows=(
+                    None
+                    if synthetic_windows is None
+                    else slice_windows_for_shot(synthetic_windows, shot)
+                ),
                 ownership_center_time=ownership_center_time[:, shot : shot + 1, :],
                 source_coordinates=state.source_coordinates[shot],
                 receiver_coordinates=state.receiver_coordinates[shot],
-                max_lag_time=state.config.max_lag_time,
-                seed_lag_range_time=state.config.seed_lag_range_time,
+                max_lag_time=max_lag_time,
+                seed_lag_range_time=min(
+                    state.config.seed_lag_range_time, max_lag_time
+                ),
                 epsilon_time=state.config.epsilon_time,
                 dt=state.windows.dt,
                 use_envelope_coarse=state.config.use_envelope_coarse,
@@ -170,9 +259,22 @@ class WRTIObjectiveEvaluator:
                 if (reflector, shot) in selected:
                     saved_tracking[(reflector, shot)] = tracking
 
+        local_shift_time = None
+        coarse_shift_time = None
+        tsyn_picked = None
+        tobs = None
+        if dual_center:
+            local_shift_time = np.array(shift_time, copy=True)
+            tobs = np.asarray(
+                state.evaluation_observed_windows.center_time, dtype=float
+            )
+            coarse_shift_time = tobs - tsyn_theory
+            tsyn_picked = tsyn_theory + local_shift_time
+            shift_time = tobs - tsyn_picked
+
         try:
             result = compute_vfsa_misfit(
-                state.fixed_mask,
+                evaluation_fixed_mask,
                 shift_time=shift_time,
                 tracked_correlation=tracked_correlation,
                 window_energy_obs=energy_obs,
@@ -184,11 +286,17 @@ class WRTIObjectiveEvaluator:
                 fallback_global_mask=fallback_global_mask,
                 fallback_argmax_mask=fallback_argmax_mask,
                 config=state.config.misfit,
+                tobs=tobs,
+                eikonal_traveltime=eikonal_traveltime,
+                tsyn_theory=tsyn_theory,
+                coarse_shift_time=coarse_shift_time,
+                local_shift_time=local_shift_time,
+                tsyn_picked=tsyn_picked,
             )
         except MisfitError as exc:
             raise EvaluatorError(str(exc)) from exc
 
-        reference_fixed_count = state.n_fixed
+        reference_fixed_count = state.evaluation_n_fixed
         current_fixed_count = result.n_fixed
         if current_fixed_count != reference_fixed_count:
             raise EvaluatorError(

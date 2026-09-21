@@ -68,6 +68,75 @@ class ZNCCStep4Tests(unittest.TestCase):
             envelope_fine_half_width_time=40.0,
         )
 
+    def test_dual_center_lag_is_synthetic_offset_from_theory(self) -> None:
+        observed_center = 150
+        synthetic_center = 70
+        local_shift = 12
+        observed = self._ricker(observed_center)[None, None, :]
+        synthetic = self._ricker(synthetic_center + local_shift)[None, None, :]
+        observed_window = build_window_result(
+            np.array([[[float(observed_center)]]]),
+            dt=self.dt,
+            t0=0.0,
+            nt=self.nt,
+            half_window_time=20.0,
+            max_lag_samples=20,
+        )
+        synthetic_window = build_window_result(
+            np.array([[[float(synthetic_center)]]]),
+            dt=self.dt,
+            t0=0.0,
+            nt=self.nt,
+            half_window_time=20.0,
+            max_lag_samples=20,
+        )
+        result = compute_zncc(
+            observed,
+            synthetic,
+            observed_window,
+            reflector=0,
+            shot=0,
+            max_lag_time=20.0,
+            dt=self.dt,
+            use_envelope_coarse=False,
+            fixed_side="observed",
+            ownership_center_time=synthetic_window.center_time,
+            synthetic_window_result=synthetic_window,
+        )
+        best = int(np.nanargmax(result.correlation[0]))
+        self.assertEqual(result.lags_samples[best], local_shift)
+
+    def test_dual_center_negative_local_shift_keeps_sign(self) -> None:
+        observed_center = 150
+        synthetic_center = 90
+        local_shift = -9
+        observed = self._ricker(observed_center)[None, None, :]
+        synthetic = self._ricker(synthetic_center + local_shift)[None, None, :]
+        observed_window = build_window_result(
+            np.array([[[float(observed_center)]]]), self.dt, 0.0, self.nt, 20.0,
+            max_lag_samples=20,
+        )
+        synthetic_window = build_window_result(
+            np.array([[[float(synthetic_center)]]]), self.dt, 0.0, self.nt, 20.0,
+            max_lag_samples=20,
+        )
+        result = compute_zncc(
+            observed,
+            synthetic,
+            observed_window,
+            reflector=0,
+            shot=0,
+            max_lag_time=20.0,
+            dt=self.dt,
+            use_envelope_coarse=False,
+            fixed_side="observed",
+            tracking_enhancement_enabled=False,
+            ownership_center_time=synthetic_window.center_time,
+            synthetic_window_result=synthetic_window,
+        )
+        best = int(np.nanargmax(result.correlation[0]))
+        self.assertEqual(result.lags_samples[best], local_shift)
+
     @staticmethod
     def _peak(result):
         return int(result.lags_samples[np.nanargmax(result.correlation[0])])

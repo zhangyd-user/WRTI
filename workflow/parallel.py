@@ -50,6 +50,7 @@ class ShotTrackingTask:
     tracking_agc_floor_ratio: float = 0.20
     tracking_receiver_stack: bool = True
     tracking_raw_refine_radius_samples: int = 1
+    synthetic_windows: WindowResult | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,7 @@ def run_shot_zncc_tracking(task: ShotTrackingTask) -> ShotTrackingResult:
         use_envelope_coarse=task.use_envelope_coarse,
         envelope_fine_half_width_time=task.envelope_fine_half_width_time,
         envelope_tracking_epsilon_time=task.envelope_tracking_epsilon_time,
+        # Keep the original coarse-envelope seed range unchanged.
         seed_lag_range_time=task.seed_lag_range_time,
         receiver_x=receiver_x,
         source_x=source_x,
@@ -143,18 +145,30 @@ def run_shot_zncc_tracking(task: ShotTrackingTask) -> ShotTrackingResult:
         tracking_agc_fraction=task.tracking_agc_fraction,
         tracking_agc_floor_ratio=task.tracking_agc_floor_ratio,
         tracking_receiver_stack=task.tracking_receiver_stack,
+        synthetic_window_result=task.synthetic_windows,
     ):
+        dual_center = task.synthetic_windows is not None
+
+        # Only candidate dual-center tracking gets the narrow DP seed range.
+        # Reference/Tobs construction keeps the legacy DP behavior unchanged.
+        tracking_seed_lag_range_time = (
+            min(0.030, float(task.max_lag_time))
+            if dual_center
+            else task.seed_lag_range_time
+        )
+
         tracking = track_correlation_result(
             correlation,
             receiver_x,
             source_x,
-            task.seed_lag_range_time,
+            tracking_seed_lag_range_time,
             task.epsilon_time,
             valid=correlation.valid,
             lag_valid=correlation.lag_valid,
             min_correlation=task.tracking_min_correlation,
             boundary_margin_samples=task.boundary_margin_samples,
             raw_refine_radius_samples=task.tracking_raw_refine_radius_samples,
+            restrict_seed_lag_range=dual_center,
         )
         completion = complete_tracked_shift(
             tracking,
