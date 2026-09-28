@@ -187,7 +187,8 @@ def _anchored_rescue_case(gather, valid=None, **rescue):
         anchor_receiver_mask=mask, anchor_pick_sample=sample,
         anchor_pick_time=pick_time, continuation_rescue={"enabled": True,
             "half_width_time": 0.020, "max_parent_states": 8,
-            "min_prominence": 0.0, "max_valid_receiver_gap": 1}, **options,
+            "min_prominence": 0.0, "max_valid_receiver_gap": 1},
+        slow_guide={"enabled": False}, **options,
     )
 
 
@@ -239,7 +240,8 @@ def test_invalid_receiver_is_not_treated_as_skippable_waveform_gap():
 
 
 def _escape_track(centers, *, base_upper=0.252, similarity=0.85, rescue=False,
-                  candidate_min_prominence=0.01, outside_frequency=None):
+                  candidate_min_prominence=0.01, outside_frequency=None,
+                  slow_guide=None):
     time = np.arange(400) * 0.001
     nr = len(centers)
     seed = 5
@@ -268,6 +270,7 @@ def _escape_track(centers, *, base_upper=0.252, similarity=0.85, rescue=False,
                              "max_valid_receiver_gap": 0},
         ownership_escape={"enabled": True, "min_neighbor_similarity": similarity,
                           "max_prediction_error_time": 0.015},
+        slow_guide=slow_guide,
     )
 
 
@@ -315,7 +318,10 @@ def test_ownership_escape_returns_to_base_automatically():
 
 def test_predictive_rescue_can_use_expanded_ownership():
     centers = np.full(20, 0.250); centers[8:] = 0.255
-    result = _escape_track(centers, rescue=True, candidate_min_prominence=1000.0)
+    result = _escape_track(
+        centers, rescue=True, candidate_min_prominence=1000.0,
+        slow_guide={"enabled": False},
+    )
     assert result.success_mask.all()
     assert result.rescue_success_count > 0
     assert result.ownership_escape_used_mask[8:].all()
@@ -335,3 +341,95 @@ def test_escape_mask_is_ignored_when_escape_is_disabled():
         candidate_min_prominence=0.01, coherence_half_window_time=0.010,
     )
     assert not result.success_mask[7]
+
+
+def _shared_guide_track(gather, anchor_times, **overrides):
+    nr = gather.shape[0]
+    seed = 2
+    anchor = np.zeros(nr, dtype=bool)
+    anchor[:5] = True
+    samples = np.full(nr, -1, dtype=int)
+    samples[anchor] = np.rint(anchor_times[anchor] / 0.001).astype(int)
+    times = np.full(nr, np.nan)
+    times[anchor] = anchor_times[anchor]
+    options = {
+        "candidate_min_distance_time": 0.015,
+        "candidate_min_prominence": 0.02,
+        "coherence_half_window_time": 0.006,
+        "max_residual_slope_ms_per_100m": 150.0,
+        "max_prediction_error_time": 0.006,
+        "prediction_soft_scale_time": 0.010,
+        "prediction_penalty_weight": 0.20,
+    }
+    options.update(overrides)
+    return track_flattened_event_sparse(
+        gather,
+        receiver_x=np.arange(nr) * 10.0,
+        valid_receiver=np.ones(nr, dtype=bool),
+        seed_receiver=seed,
+        seed_time=float(anchor_times[seed]),
+        dt=0.001,
+        anchor_receiver_mask=anchor,
+        anchor_pick_sample=samples,
+        anchor_pick_time=times,
+        **options,
+    )
+
+
+def test_shared_guide_reinserts_weak_peak_removed_by_distance_pruning():
+    time = np.arange(500) * 0.001
+    nr = 24
+    target = np.full(nr, 0.250)
+    gather = np.stack([
+        _ricker(time, target[i], frequency=70.0)
+        + (0.0 if i < 5 else 2.0) * _ricker(time, 0.260, frequency=70.0)
+        for i in range(nr)
+    ])
+    result = _shared_guide_track(gather, target)
+    assert result.success_mask.all()
+    np.testing.assert_allclose(result.pick_time, target, atol=0.002)
+
+
+def test_shared_guide_survives_local_predictor_branch_error():
+    time = np.arange(600) * 0.001
+    nr = 26
+    target = np.full(nr, 0.250)
+    competitor = np.full(nr, 0.285)
+    competitor[8:11] = [0.258, 0.266, 0.274]
+    gather = np.stack([
+        _ricker(time, target[i], frequency=60.0)
+        + (2.5 if 8 <= i < 15 else 0.7) * _ricker(
+            time, competitor[i], frequency=60.0
+        )
+        for i in range(nr)
+    ])
+    result = _shared_guide_track(gather, target)
+    assert result.success_mask[-8:].all()
+    np.testing.assert_allclose(result.pick_time[-8:], target[-8:], atol=0.003)
+
+
+def test_shared_guide_is_not_trained_by_persistent_drifting_competitor():
+    time = np.arange(600) * 0.001
+    nr = 30
+    target = np.full(nr, 0.250)
+    competitor = 0.250 + 0.003 * np.maximum(0, np.arange(nr) - 7)
+    gather = np.stack([
+        _ricker(time, target[i], frequency=65.0)
+        + (1.8 if 7 <= i < 20 else 0.5) * _ricker(
+            time, competitor[i], frequency=65.0
+        )
+        for i in range(nr)
+    ])
+    result = _shared_guide_track(gather, target)
+    assert result.success_mask[-8:].all()
+    np.testing.assert_allclose(result.pick_time[-8:], target[-8:], atol=0.003)
+
+
+def test_shared_guide_updates_along_gently_sloping_reflector():
+    time = np.arange(600) * 0.001
+    nr = 28
+    target = 0.240 + 0.0005 * np.arange(nr)
+    gather = np.stack([_ricker(time, center, frequency=60.0) for center in target])
+    result = _shared_guide_track(gather, target)
+    assert result.success_mask.all()
+    np.testing.assert_allclose(result.pick_time, target, atol=0.002)

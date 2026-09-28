@@ -890,10 +890,16 @@ def _composite_tracking(original, segments, mask):
     arrays.update({name: np.zeros_like(getattr(original, name), dtype=int) for name in counts})
     arrays.update({name: np.zeros_like(getattr(original, name), dtype=bool) for name in bools})
 
-    # Identity has already been established before this merge.  If two repair
-    # segments overlap, prefer the upper (earlier-time) pick because the known
-    # diffraction failure mode drags a competing branch downward.  ORIGINAL,
-    # when present, remains the fixed source of truth in its own trusted mask.
+    # Reflector identity has already been established before this merge.
+    # Preserve all trusted overlaps until this final composition step.
+    #
+    # When multiple trusted segments own the same receiver, prefer the
+    # earlier-time (upper) pick regardless of whether its source is ORIGINAL,
+    # LEFT repair, or RIGHT repair.  This targets the dominant failure mode in
+    # which diffraction pulls a tracked branch downward in time.
+    #
+    # Source type therefore has no priority during overlap composition.
+    # Median ZNCC and prediction error are only tie-breakers after pick time.
     for receiver in np.flatnonzero(mask):
         owners = [
             segment for segment in segments
@@ -901,27 +907,25 @@ def _composite_tracking(original, segments, mask):
         ]
         if not owners:
             continue
-        original_owners = [item for item in owners if str(item.source_type) == "ORIGINAL"]
-        if original_owners:
-            chosen = max(
-                original_owners,
-                key=lambda item: (
-                    item.coverage, item.median_zncc, -item.median_abs_prediction_error
-                ),
-            )
-        elif len(owners) == 1:
+        if len(owners) == 1:
             chosen = owners[0]
         else:
             finite = [
-                item for item in owners
+                item
+                for item in owners
                 if np.isfinite(item.tracking.pick_time[int(receiver)])
             ]
+            candidates_for_choice = finite if finite else owners
             chosen = min(
-                finite if finite else owners,
+                candidates_for_choice,
                 key=lambda item: (
-                    item.tracking.pick_time[int(receiver)]
-                    if np.isfinite(item.tracking.pick_time[int(receiver)]) else np.inf,
-                    -item.median_zncc,
+                    (
+                        float(item.tracking.pick_time[int(receiver)])
+                        if np.isfinite(item.tracking.pick_time[int(receiver)])
+                        else np.inf
+                    ),
+                    -float(item.median_zncc),
+                    float(item.median_abs_prediction_error),
                 ),
             )
         for name in arrays:
@@ -1582,6 +1586,8 @@ def repair_tracking_break(
                 "seed_time", "state_valid", "escape_state_valid", "anchor_receiver_mask",
                 "anchor_pick_sample", "anchor_pick_time"):
         tracker_cfg.pop(key, None)
+    repair_tracker_cfg = dict(tracker_cfg)
+    repair_tracker_cfg["slow_guide"] = {"enabled": False}
     seed_cfg = dict(seed_search_options or {})
     for key in ("tracker_options", "seed_receiver", "state_valid", "dt", "t0"):
         seed_cfg.pop(key, None)
@@ -1845,7 +1851,7 @@ def repair_tracking_break(
                     escape_state_valid=repair_state_valid, anchor_receiver_mask=seed.anchor_receiver_mask,
                     anchor_pick_sample=seed.anchor_pick_sample, anchor_pick_time=seed.anchor_pick_time,
                     dt=dt, t0=t0, continuation_rescue=continuation_rescue,
-                    ownership_escape=ownership_escape, **tracker_cfg,
+                    ownership_escape=ownership_escape, **repair_tracker_cfg,
                 )
                 full_count += 1
                 raw_audit = audit_rkshot(
@@ -1969,11 +1975,11 @@ def repair_tracking_break(
                         if not overlap_identity['passed']:
                             print(f"  reason = {overlap_identity['reason']}", flush=True)
 
-                blocked = np.zeros(available.size, bool)
-                for original in preserved:
-                    blocked[original.start_receiver:original.end_receiver + 1] = True
                 for raw in raw_segments:
-                    unique_allowed = allowed & ~blocked
+                    # Keep the full trusted REPAIR interval, including overlap with
+                    # preserved ORIGINAL segments.  The overlap is useful evidence and
+                    # final ownership is decided later by _composite_tracking().
+                    unique_allowed = np.asarray(allowed, dtype=bool).copy()
                     unique_allowed[:raw.start_receiver] = False
                     unique_allowed[raw.end_receiver + 1:] = False
                     unique = extract_trusted_segments(
@@ -2229,7 +2235,7 @@ def repair_tracking_break(
             metadata = repair_metadata.get(id(segment), {})
             bank = repair_banks.get(id(segment))
             print(f"    raw_receivers={segment.raw_start_receiver}:{segment.raw_end_receiver}", flush=True)
-            print(f"    after_original_overlap_trim={segment.start_receiver}:{segment.end_receiver}", flush=True)
+            print(f"    retained_trusted_receivers={segment.start_receiver}:{segment.end_receiver}", flush=True)
             print(f"    new_trusted_receivers={np.count_nonzero(segment.trusted_mask & available & ~preserved_mask)}", flush=True)
             print(f"    neighbor_ownership_valid={segment.identity_valid}", flush=True)
             print(f"    raw_audit={metadata.get('raw_audit_status', 'UNKNOWN')}", flush=True)

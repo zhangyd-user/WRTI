@@ -5,6 +5,11 @@ Candidate dual-center calls may pass ``receiver_mask`` (BootstrapFixedMask):
 every contiguous True segment gets its own seed and the DP may skip up to
 ``max_consecutive_failures`` bad receivers while keeping the same lag jump
 constraint against the last successful pick.
+
+Both public tracking functions keep the legacy two-DP behavior by default.
+Callers may explicitly set ``run_raw_dp=False`` to use the enhanced tracking
+guide as the final path while raw waveform ZNCC supplies global polarity,
+validity, QC correlation values, and sub-sample peak refinement.
 """
 
 from __future__ import annotations
@@ -163,6 +168,77 @@ def _choose_segment_seed(
     return int(c[np.argmin(np.abs(receivers[c] - float(source_x)))])
 
 
+def _coarse_majority_waveform_polarity(
+    coarse_lag_samples: np.ndarray | None,
+    lags_samples: np.ndarray,
+    waveform_correlation: np.ndarray,
+    vote_valid: np.ndarray,
+) -> int | None:
+    """Return the global raw-waveform ZNCC polarity voted by coarse picks.
+
+    The envelope/coarse tracker supplies only the lag position.  At each finite
+    coarse lag, this helper samples the *raw waveform* ZNCC at that exact lag
+    and counts positive versus negative signs.  Count is the primary vote; if
+    counts tie, summed absolute raw-ZNCC strength breaks the tie.
+
+    ``None`` is returned when no finite raw waveform ZNCC exists at any coarse
+    pick, so legacy/direct callers can continue without a forced polarity.
+    """
+
+    if coarse_lag_samples is None:
+        return None
+
+    coarse = np.asarray(coarse_lag_samples, dtype=float)
+    lags = np.asarray(lags_samples, dtype=int)
+    waveform = np.asarray(waveform_correlation, dtype=float)
+    allowed = np.asarray(vote_valid, dtype=bool)
+
+    if (
+        waveform.ndim != 2
+        or lags.ndim != 1
+        or waveform.shape[1] != lags.size
+        or allowed.shape != waveform.shape
+    ):
+        raise TrackingError(
+            "waveform_correlation and lags_samples are inconsistent for polarity voting."
+        )
+    if coarse.shape != (waveform.shape[0],):
+        return None
+    if lags.size == 0:
+        return None
+
+    lag_to_index = {int(lag): index for index, lag in enumerate(lags)}
+    positive_count = 0
+    negative_count = 0
+    positive_strength = 0.0
+    negative_strength = 0.0
+
+    for receiver, coarse_value in enumerate(coarse):
+        if not np.isfinite(coarse_value):
+            continue
+        lag_sample = int(round(float(coarse_value)))
+        index = lag_to_index.get(lag_sample)
+        if index is None or not allowed[receiver, index]:
+            continue
+        rho = float(waveform[int(receiver), int(index)])
+        if not np.isfinite(rho) or rho == 0.0:
+            continue
+        if rho > 0.0:
+            positive_count += 1
+            positive_strength += abs(rho)
+        else:
+            negative_count += 1
+            negative_strength += abs(rho)
+
+    if positive_count > negative_count:
+        return +1
+    if negative_count > positive_count:
+        return -1
+    if positive_count == 0 and negative_count == 0:
+        return None
+    return +1 if positive_strength >= negative_strength else -1
+
+
 def _directional_dp_from_seed(
     values: np.ndarray,
     row_valid: np.ndarray,
@@ -170,6 +246,7 @@ def _directional_dp_from_seed(
     *,
     epsilon_samples: int,
     max_consecutive_failures: int = 0,
+    polarity_values: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Global directional DP with optional bounded receiver skipping.
 
@@ -185,6 +262,14 @@ def _directional_dp_from_seed(
         or max_consecutive_failures < 0
     ):
         raise TrackingError("max_consecutive_failures must be non-negative integer.")
+
+    polarity = values if polarity_values is None else np.asarray(
+        polarity_values, dtype=float
+    )
+    if polarity.shape != values.shape:
+        raise TrackingError(
+            "polarity_values must match the correlation matrix shape."
+        )
 
     nrow, nlag = order.size, values.shape[1]
     max_jump = int(max_consecutive_failures) + 1
@@ -220,7 +305,7 @@ def _directional_dp_from_seed(
                     src = np.arange(nlag, dtype=int)
                 dst = src + offset
                 same_polarity = (
-                    values[receiver, src] * values[target_receiver, dst]
+                    polarity[receiver, src] * polarity[target_receiver, dst]
                 ) > 0.0
                 usable = (target_cov[dst] > 0) & same_polarity
                 if not np.any(usable):
@@ -281,6 +366,7 @@ def _global_dp_segment(
     epsilon_samples: int,
     max_consecutive_failures: int = 0,
     seed_allowed: np.ndarray | None = None,
+    polarity_values: np.ndarray | None = None,
 ) -> np.ndarray:
     del lags
     path = np.full(segment.size, -1, dtype=int)
@@ -302,6 +388,7 @@ def _global_dp_segment(
         left_order,
         epsilon_samples=epsilon_samples,
         max_consecutive_failures=max_consecutive_failures,
+        polarity_values=polarity_values,
     )
     rc, rs, rnl, rns = _directional_dp_from_seed(
         values,
@@ -309,6 +396,7 @@ def _global_dp_segment(
         right_order,
         epsilon_samples=epsilon_samples,
         max_consecutive_failures=max_consecutive_failures,
+        polarity_values=polarity_values,
     )
 
     total_cov = lc + rc - 1
@@ -394,6 +482,8 @@ def track_zncc(
     receiver_mask: np.ndarray | None = None,
     max_consecutive_failures: int = 3,
     hard_min_correlation: bool = False,
+    required_polarity: int | None = None,
+    run_raw_dp: bool = True,
 ) -> TrackingResult:
     values, lags, receivers = _validate_inputs(
         correlation, lags_samples, receiver_x, source_x, dt
@@ -424,6 +514,11 @@ def track_zncc(
     ):
         raise TrackingError("min_correlation must be in [-1,1] or None.")
 
+    if required_polarity is not None and int(required_polarity) not in (-1, +1):
+        raise TrackingError("required_polarity must be -1, +1, or None.")
+    if not isinstance(run_raw_dp, (bool, np.bool_)):
+        raise TrackingError("run_raw_dp must be boolean.")
+
     nreceiver = values.shape[0]
     domain = None if receiver_mask is None else np.asarray(receiver_mask, dtype=bool)
     if domain is not None and domain.shape != (nreceiver,):
@@ -441,14 +536,36 @@ def track_zncc(
     if lag_valid is not None:
         row_valid &= _normalise_valid(values, lag_valid)
 
-    quality_allowed = np.ones_like(row_valid, dtype=bool)
-    if hard_min_correlation and min_correlation is not None:
-        quality_allowed = np.isfinite(measurement) & (
+    measurement_valid = _normalise_valid(measurement, valid)
+    if lag_valid is not None:
+        measurement_valid &= _normalise_valid(measurement, lag_valid)
+    if domain is not None:
+        measurement_valid &= domain[:, None]
+    if (
+        hard_min_correlation
+        and min_correlation is not None
+        and (not run_raw_dp or domain is not None)
+    ):
+        measurement_valid &= np.isfinite(measurement) & (
             np.abs(measurement) >= abs(float(min_correlation))
         )
 
     guide_valid = np.array(row_valid, copy=True)
+    if not run_raw_dp:
+        guide_valid &= measurement_valid
+    if not run_raw_dp and required_polarity is not None:
+        if int(required_polarity) > 0:
+            polarity_allowed = np.isfinite(measurement) & (measurement > 0.0)
+        else:
+            polarity_allowed = np.isfinite(measurement) & (measurement < 0.0)
+        guide_valid &= polarity_allowed
+
+    # Guide path is now sufficient to be the production path when run_raw_dp=False.
+    # Keep explicit segment seeds so TrackingResult preserves the old multi-segment
+    # seed-reporting semantics without running the second DP.
     guide_path = np.full(nreceiver, -1, dtype=int)
+    guide_segment_seeds: list[int] = []
+    guide_polarity_values = measurement if not run_raw_dp else None
 
     if domain is None:
         if restrict_seed_lag_range:
@@ -463,18 +580,19 @@ def track_zncc(
                 segment,
                 seed_receiver=legacy_seed,
                 epsilon_samples=epsilon_samples,
+                polarity_values=guide_polarity_values,
             )
             ok = p >= 0
             guide_path[segment[ok]] = p[ok]
     else:
         guide_valid &= domain[:, None]
-        guide_valid &= quality_allowed
         for segment in _segments_from_mask(domain):
             seed = _choose_segment_seed(
                 guide_valid, segment, receivers, source_x, seed_allowed
             )
             if seed is None:
                 continue
+            guide_segment_seeds.append(seed)
             p = _global_dp_segment(
                 values,
                 guide_valid,
@@ -484,75 +602,103 @@ def track_zncc(
                 epsilon_samples=epsilon_samples,
                 max_consecutive_failures=int(max_consecutive_failures),
                 seed_allowed=seed_allowed,
+                polarity_values=guide_polarity_values,
             )
             ok = p >= 0
             guide_path[segment[ok]] = p[ok]
 
-    raw_valid = _normalise_valid(measurement, valid)
-    if lag_valid is not None:
-        raw_valid &= _normalise_valid(measurement, lag_valid)
-    if domain is not None:
-        raw_valid &= domain[:, None]
-        raw_valid &= quality_allowed
-
-    raw_corridor = np.zeros_like(raw_valid, dtype=bool)
-    guide_success = np.flatnonzero(guide_path >= 0)
-    if guide_success.size:
-        offsets = np.arange(-int(raw_refine_radius_samples), int(raw_refine_radius_samples) + 1)
-        columns = guide_path[guide_success, None] + offsets
-        inside = (columns >= 0) & (columns < lags.size)
-        rows = np.broadcast_to(guide_success[:, None], columns.shape)
-        raw_corridor[rows[inside], columns[inside]] = True
-    raw_corridor &= raw_valid
-
-    path = np.full(nreceiver, -1, dtype=int)
-    segment_seeds: list[int] = []
     if domain is None:
-        if restrict_seed_lag_range:
-            raw_corridor[legacy_seed] &= seed_allowed
-        for segment in _valid_receiver_segments(raw_corridor):
-            if legacy_seed not in segment:
-                continue
-            p = _global_dp_segment(
-                measurement,
-                raw_corridor,
-                lags,
-                segment,
-                seed_receiver=legacy_seed,
-                epsilon_samples=epsilon_samples,
-            )
-            ok = p >= 0
-            path[segment[ok]] = p[ok]
-        seed_receiver = legacy_seed
-        _assert_path_continuity(path, lags, epsilon_samples)
-    else:
-        for segment in _segments_from_mask(domain):
-            seed = _choose_segment_seed(
-                raw_corridor, segment, receivers, source_x, seed_allowed
-            )
-            if seed is None:
-                continue
-            segment_seeds.append(seed)
-            p = _global_dp_segment(
-                measurement,
-                raw_corridor,
-                lags,
-                segment,
-                seed_receiver=seed,
-                epsilon_samples=epsilon_samples,
-                max_consecutive_failures=int(max_consecutive_failures),
-                seed_allowed=seed_allowed,
-            )
-            ok = p >= 0
-            path[segment[ok]] = p[ok]
-        if segment_seeds:
-            s = np.asarray(segment_seeds, dtype=int)
-            seed_receiver = int(s[np.argmin(np.abs(receivers[s] - float(source_x)))])
-        else:
-            seed_receiver = legacy_seed
-        _assert_gap_continuity(
-            path, lags, epsilon_samples, domain, int(max_consecutive_failures)
+        guide_seed_receiver = legacy_seed
+    elif guide_segment_seeds:
+        guide_seeds = np.asarray(guide_segment_seeds, dtype=int)
+        guide_seed_receiver = int(
+            guide_seeds[
+                np.argmin(np.abs(receivers[guide_seeds] - float(source_x)))
+            ]
         )
+    else:
+        guide_seed_receiver = legacy_seed
+
+    if not run_raw_dp:
+        if domain is None:
+            _assert_path_continuity(guide_path, lags, epsilon_samples)
+        else:
+            _assert_gap_continuity(
+                guide_path,
+                lags,
+                epsilon_samples,
+                domain,
+                int(max_consecutive_failures),
+            )
+
+    raw_valid = measurement_valid
+
+    if run_raw_dp:
+        raw_corridor = np.zeros_like(raw_valid, dtype=bool)
+        guide_success = np.flatnonzero(guide_path >= 0)
+        if guide_success.size:
+            offsets = np.arange(-int(raw_refine_radius_samples), int(raw_refine_radius_samples) + 1)
+            columns = guide_path[guide_success, None] + offsets
+            inside = (columns >= 0) & (columns < lags.size)
+            rows = np.broadcast_to(guide_success[:, None], columns.shape)
+            raw_corridor[rows[inside], columns[inside]] = True
+        raw_corridor &= raw_valid
+
+        path = np.full(nreceiver, -1, dtype=int)
+        segment_seeds: list[int] = []
+        if domain is None:
+            if restrict_seed_lag_range:
+                raw_corridor[legacy_seed] &= seed_allowed
+            for segment in _valid_receiver_segments(raw_corridor):
+                if legacy_seed not in segment:
+                    continue
+                p = _global_dp_segment(
+                    measurement,
+                    raw_corridor,
+                    lags,
+                    segment,
+                    seed_receiver=legacy_seed,
+                    epsilon_samples=epsilon_samples,
+                )
+                ok = p >= 0
+                path[segment[ok]] = p[ok]
+            seed_receiver = legacy_seed
+            _assert_path_continuity(path, lags, epsilon_samples)
+        else:
+            for segment in _segments_from_mask(domain):
+                seed = _choose_segment_seed(
+                    raw_corridor, segment, receivers, source_x, seed_allowed
+                )
+                if seed is None:
+                    continue
+                segment_seeds.append(seed)
+                p = _global_dp_segment(
+                    measurement,
+                    raw_corridor,
+                    lags,
+                    segment,
+                    seed_receiver=seed,
+                    epsilon_samples=epsilon_samples,
+                    max_consecutive_failures=int(max_consecutive_failures),
+                    seed_allowed=seed_allowed,
+                )
+                ok = p >= 0
+                path[segment[ok]] = p[ok]
+            if segment_seeds:
+                s = np.asarray(segment_seeds, dtype=int)
+                seed_receiver = int(s[np.argmin(np.abs(receivers[s] - float(source_x)))])
+            else:
+                seed_receiver = legacy_seed
+            _assert_gap_continuity(
+                path, lags, epsilon_samples, domain, int(max_consecutive_failures)
+            )
+
+    else:
+        # Production guide-final mode: preserve the old raw DP implementation
+        # above but do not call it.  The guide already used the same segment,
+        # seed, bidirectional DP, gap-skip, epsilon and coverage-first machinery.
+        path = np.array(guide_path, dtype=int, copy=True)
+        seed_receiver = int(guide_seed_receiver)
 
     success = path >= 0
     shift_samples = np.full(nreceiver, np.nan)
@@ -561,9 +707,35 @@ def track_zncc(
     boundary_flag = np.zeros(nreceiver, dtype=bool)
     boundary_limit = float(np.max(np.abs(lags))) - float(boundary_margin_samples)
 
+    if run_raw_dp:
+        final_measurement_valid = raw_corridor
+    else:
+        # Do not run a second path search.  Raw waveform ZNCC is used only for
+        # final QC and the existing sub-sample three-point peak refinement.
+        final_measurement_valid = np.array(raw_valid, copy=True)
+        if required_polarity is not None:
+            if int(required_polarity) > 0:
+                final_measurement_valid &= measurement > 0.0
+            else:
+                final_measurement_valid &= measurement < 0.0
+
+    success_receivers = np.flatnonzero(success)
+    if success_receivers.size:
+        final_indices = path[success_receivers]
+        if not np.all(final_measurement_valid[success_receivers, final_indices]):
+            raise AssertionError(
+                "Final path contains a state without valid waveform correlation."
+            )
+        if required_polarity is not None and not run_raw_dp:
+            final_signs = np.sign(measurement[success_receivers, final_indices])
+            if not np.all(final_signs == int(required_polarity)):
+                raise AssertionError("Guide-final path violated global polarity.")
+
     for receiver in np.flatnonzero(success):
         index = int(path[receiver])
-        safe_row = np.where(raw_corridor[receiver], measurement[receiver], np.nan)
+        safe_row = np.where(
+            final_measurement_valid[receiver], measurement[receiver], np.nan
+        )
         shift_samples[receiver] = _refine_peak(safe_row, index, lags)
         shift_time[receiver] = shift_samples[receiver] * float(dt)
         tracked_correlation[receiver] = measurement[receiver, index]
@@ -605,6 +777,7 @@ def track_correlation_result(
     receiver_mask: np.ndarray | None = None,
     max_consecutive_failures: int = 3,
     hard_min_correlation: bool = False,
+    run_raw_dp: bool = True,
 ) -> TrackingResult:
     result_valid = correlation_result.valid if valid is None else valid
     result_lag_valid = (
@@ -616,6 +789,33 @@ def track_correlation_result(
     raw = getattr(correlation_result, "waveform_correlation", None)
     if raw is None:
         raw = correlation_result.correlation
+
+    # Guide-final production mode locks one waveform-ZNCC polarity from the
+    # envelope/coarse path.  Setting run_raw_dp=True is an exact compatibility
+    # escape hatch: it restores the legacy two-DP call without this new global
+    # polarity constraint.
+    required_polarity = None
+    if not run_raw_dp:
+        vote_valid = _normalise_valid(raw, result_valid)
+        if result_lag_valid is not None:
+            vote_valid &= _normalise_valid(raw, result_lag_valid)
+        if receiver_mask is not None:
+            domain = np.asarray(receiver_mask, dtype=bool)
+            if domain.shape != (raw.shape[0],):
+                raise TrackingError("receiver_mask must have shape [nreceiver].")
+            vote_valid &= domain[:, None]
+        if hard_min_correlation and min_correlation is not None:
+            vote_valid &= np.abs(raw) >= abs(float(min_correlation))
+
+        # The global polarity lock is intentional for the current reflector
+        # tracking model. Disconnected segments may reseed, but cannot flip.
+        required_polarity = _coarse_majority_waveform_polarity(
+            getattr(correlation_result, "coarse_lag_samples", None),
+            correlation_result.lags_samples,
+            raw,
+            vote_valid,
+        )
+
     return track_zncc(
         guide,
         correlation_result.lags_samples,
@@ -635,4 +835,6 @@ def track_correlation_result(
         receiver_mask=receiver_mask,
         max_consecutive_failures=max_consecutive_failures,
         hard_min_correlation=hard_min_correlation,
+        required_polarity=required_polarity,
+        run_raw_dp=run_raw_dp,
     )

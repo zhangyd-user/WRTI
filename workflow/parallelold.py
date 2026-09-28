@@ -11,11 +11,6 @@ import numpy as np
 
 from ..correlation import CorrelationResult, PreprocessHook, iter_zncc
 from ..tracking import TrackingResult, complete_tracked_shift, track_correlation_result
-from ..tracking.quality import (
-    DEFAULT_TRUST_CORRELATION,
-    DPFailureResult,
-    evaluate_dp_failure,
-)
 from ..window import WindowResult
 
 
@@ -102,18 +97,7 @@ def slice_windows_for_shot(windows: WindowResult, shot: int) -> WindowResult:
 
 
 def run_shot_zncc_tracking(task: ShotTrackingTask) -> ShotTrackingResult:
-    """Compute all reflector ZNCC/DP results and then complete failures per shot.
-
-    Candidate dual-center tracking uses the rewritten post-DP quality logic:
-    receiver-level low-|ZNCC| points become path failures, and a reflector/shot
-    whose path is both mostly low-quality and strongly zigzagging is classified
-    as a whole-event collapse.  Completion is deliberately deferred until all
-    reflectors of the shot have been classified so a collapsed reflector can
-    borrow the median global lag from every non-collapsed reflector in the same
-    shot.
-
-    Reference/Tobs construction keeps the legacy hard-failure behavior.
-    """
+    """Compute all reflector ZNCC and DP results for one shot."""
 
     shot = int(task.shot_index)
     observed = np.asarray(task.observed_shot, dtype=float)[None, ...]
@@ -123,7 +107,6 @@ def run_shot_zncc_tracking(task: ShotTrackingTask) -> ShotTrackingResult:
         raise WRTIParallelError(
             f"Shot {shot} gather shape is inconsistent with its windows."
         )
-
     tracking_receiver_mask = None
     if task.receiver_mask is not None:
         tracking_receiver_mask = np.asarray(task.receiver_mask, dtype=bool)
@@ -132,15 +115,11 @@ def run_shot_zncc_tracking(task: ShotTrackingTask) -> ShotTrackingResult:
                 "receiver_mask must have shape [nref, nreceiver]; "
                 f"got {tracking_receiver_mask.shape}, expected {(nref, nr)}."
             )
-
     receiver_x = np.asarray(task.receiver_coordinates[:, 0], dtype=float)
     source_x = float(task.source_coordinates[0])
     selected = set(int(value) for value in task.selected_reflectors)
 
-    tracking_results: list[TrackingResult | None] = [None] * nref
-    correlation_results: list[CorrelationResult | None] = [None] * nref
-    failure_results: list[DPFailureResult | None] = [None] * nref
-
+    tracking_results: list[TrackingResult] = []
     saved_correlations: dict[tuple[int, int], CorrelationResult] = {}
     trace_valid = np.zeros((nref, nr), dtype=bool)
     shift_time = np.full((nref, nr), np.nan, dtype=float)
@@ -154,9 +133,6 @@ def run_shot_zncc_tracking(task: ShotTrackingTask) -> ShotTrackingResult:
     fallback_global_mask = np.zeros((nref, nr), dtype=bool)
     fallback_argmax_mask = np.zeros((nref, nr), dtype=bool)
 
-    # Phase 1: compute ZNCC + DP for every reflector and classify quality.
-    # No fallback is applied yet because event-collapse fallback needs global
-    # lags from the other reflectors of this same shot.
     for reflector, _, correlation in iter_zncc(
         observed,
         synthetic,
@@ -191,12 +167,6 @@ def run_shot_zncc_tracking(task: ShotTrackingTask) -> ShotTrackingResult:
             else task.seed_lag_range_time
         )
 
-        reflector_receiver_mask = (
-            None
-            if tracking_receiver_mask is None
-            else tracking_receiver_mask[reflector]
-        )
-
         tracking = track_correlation_result(
             correlation,
             receiver_x,
@@ -209,117 +179,41 @@ def run_shot_zncc_tracking(task: ShotTrackingTask) -> ShotTrackingResult:
             boundary_margin_samples=task.boundary_margin_samples,
             raw_refine_radius_samples=task.tracking_raw_refine_radius_samples,
             restrict_seed_lag_range=dual_center,
-            receiver_mask=reflector_receiver_mask,
+            receiver_mask=(
+                None
+                if tracking_receiver_mask is None
+                else tracking_receiver_mask[reflector]
+            ),
             max_consecutive_failures=(
                 int(task.max_consecutive_dp_failures) if dual_center else 0
             ),
-            # Keep the existing DP state-admission rule unchanged.  In
-            # candidate dual-center production, |ZNCC| below the configured
-            # tracking_min_correlation (typically 0.3) cannot enter DP.
             hard_min_correlation=dual_center,
             # Production uses the enhanced guide as the final integer-lag path.
             # Raw ZNCC still supplies validity, polarity, QC, and refinement.
             # The legacy second DP remains available with run_raw_dp=True.
             run_raw_dp=False,
         )
-
-        quality = evaluate_dp_failure(
-            tracking,
-            receiver_mask=reflector_receiver_mask,
-            # Apply the new trust/collapse logic only to candidate dual-center
-            # evaluation.  Reference/Tobs generation keeps legacy hard failure.
-            apply_quality=dual_center,
-            # Reuse the existing DP continuity scale only to define a
-            # significant post-DP local zigzag; this does not alter DP.
-            epsilon_time=float(task.epsilon_time),
-        )
-
-        tracking_results[reflector] = tracking
-        correlation_results[reflector] = correlation
-        failure_results[reflector] = quality
-
-        trace_valid[reflector] = correlation.valid
-        tracked_correlation[reflector] = tracking.tracked_correlation
-        energy_obs[reflector] = correlation.window_energy_obs
-        energy_syn[reflector] = correlation.window_energy_syn
-        boundary_flag[reflector] = tracking.boundary_flag
-
-    if any(value is None for value in tracking_results):
-        raise WRTIParallelError(
-            f"Shot {shot} did not return DP tracking for all {nref} reflectors."
-        )
-    if any(value is None for value in correlation_results):
-        raise WRTIParallelError(
-            f"Shot {shot} did not return correlations for all {nref} reflectors."
-        )
-    if any(value is None for value in failure_results):
-        raise WRTIParallelError(
-            f"Shot {shot} did not return failure classification for all {nref} reflectors."
-        )
-
-    # Median of the per-reflector trusted global lags from every non-collapsed
-    # reflector in this shot.  This is the only global lag used when an entire
-    # Rk-shot collapses.
-    noncollapsed_global_lags = [
-        float(result.global_lag)
-        for result in failure_results
-        if result is not None
-        and not result.event_collapse
-        and result.global_lag is not None
-        and np.isfinite(result.global_lag)
-    ]
-    shot_global_shift = (
-        float(np.median(noncollapsed_global_lags))
-        if noncollapsed_global_lags
-        else 0.0
-    )
-
-    # Phase 2: complete failures.  Normal point failures use the legacy
-    # local -> same-Rk global -> argmax chain.  A whole-event collapse skips
-    # its own unreliable path and uses the shot-wide global lag above.
-    for reflector in range(nref):
-        tracking = tracking_results[reflector]
-        correlation = correlation_results[reflector]
-        quality = failure_results[reflector]
-        assert tracking is not None
-        assert correlation is not None
-        assert quality is not None
-
-        reflector_receiver_mask = (
-            None
-            if tracking_receiver_mask is None
-            else tracking_receiver_mask[reflector]
-        )
-
         completion = complete_tracked_shift(
             tracking,
             correlation,
             # The existing seed lag range is the configured central/safe lag
             # range.  It is deliberately narrower than the full ZNCC range.
             safe_lag_range_time=task.seed_lag_range_time,
-            failure_mask=quality.failure_mask,
-            receiver_mask=reflector_receiver_mask,
-            event_collapse=quality.event_collapse,
-            shot_global_shift=shot_global_shift,
-            # Preserve legacy reference/Tobs argmax behavior, but candidate
-            # production must not reinsert a point rejected by the 0.5 trust
-            # threshold.
-            argmax_trust_correlation=(
-                DEFAULT_TRUST_CORRELATION
-                if task.synthetic_windows is not None
-                else None
-            ),
         )
-
+        tracking_results.append(tracking)
+        trace_valid[reflector] = correlation.valid
         shift_time[reflector] = completion.final_shift
         path_failure_mask_array[reflector] = completion.dp_failure_mask
         fallback_local_mask[reflector] = completion.fallback_local_mask
         fallback_global_mask[reflector] = completion.fallback_global_mask
         fallback_argmax_mask[reflector] = completion.fallback_argmax_mask
-        # This array means finite final data available to the objective; path
-        # quality remains separately represented by path_failure_mask_array.
+        tracked_correlation[reflector] = tracking.tracked_correlation
+        energy_obs[reflector] = correlation.window_energy_obs
+        energy_syn[reflector] = correlation.window_energy_syn
+        boundary_flag[reflector] = tracking.boundary_flag
+        # This array now means finite final data available to the objective;
+        # DP quality remains available separately as path_failure_mask_array.
         tracking_success[reflector] = np.isfinite(completion.final_shift)
-
         if reflector in selected:
             # The one-shot window uses local shot index 0; restore the global
             # shot index only for diagnostic results that leave the worker.
@@ -328,18 +222,14 @@ def run_shot_zncc_tracking(task: ShotTrackingTask) -> ShotTrackingResult:
                 shot=shot,
             )
 
-    final_tracking = tuple(
-        value for value in tracking_results if value is not None
-    )
-    if len(final_tracking) != nref:
+    if len(tracking_results) != nref:
         raise WRTIParallelError(
-            f"Shot {shot} returned {len(final_tracking)} reflector results; "
+            f"Shot {shot} returned {len(tracking_results)} reflector results; "
             f"expected {nref}."
         )
-
     return ShotTrackingResult(
         shot_index=shot,
-        tracking=final_tracking,
+        tracking=tuple(tracking_results),
         correlations=saved_correlations,
         trace_valid=trace_valid,
         shift_time=shift_time,
@@ -353,6 +243,7 @@ def run_shot_zncc_tracking(task: ShotTrackingTask) -> ShotTrackingResult:
         boundary_flag=boundary_flag,
         tracking_success=tracking_success,
     )
+
 
 def run_shot_tasks(
     tasks: Iterable[ShotTrackingTask],

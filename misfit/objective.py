@@ -141,6 +141,7 @@ class MisfitResult:
     """Formal fixed-mask sum objective and tracking/fallback diagnostics."""
 
     misfit_sum: float
+    misfit_by_reflector: np.ndarray
     shift_time: np.ndarray
     tracked_correlation: np.ndarray
     window_energy_obs: np.ndarray
@@ -208,8 +209,26 @@ class MisfitResult:
             if array.shape != shape:
                 raise MisfitError(f"{name} must have shape {shape}.")
             optional_arrays[name] = array
+        misfit_by_reflector = np.asarray(self.misfit_by_reflector, dtype=float)
+        if misfit_by_reflector.shape != (shape[0],):
+            raise MisfitError("misfit_by_reflector must have shape [nref].")
+        if not np.all(np.isfinite(misfit_by_reflector)) or np.any(
+            misfit_by_reflector < 0
+        ):
+            raise MisfitError(
+                "misfit_by_reflector must be finite and non-negative."
+            )
         if not np.isfinite(self.misfit_sum) or self.misfit_sum < 0:
             raise MisfitError("misfit_sum must be finite and non-negative.")
+        if not np.isclose(
+            self.misfit_sum,
+            np.sum(misfit_by_reflector),
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        ):
+            raise MisfitError(
+                "misfit_sum must equal the sum of misfit_by_reflector."
+            )
         if (
             isinstance(self.failure_count, bool)
             or int(self.failure_count) != self.failure_count
@@ -257,6 +276,11 @@ class MisfitResult:
             raise MisfitError("boundary_qc_mask must be contained in fixed_mask.")
 
         object.__setattr__(self, "misfit_sum", float(self.misfit_sum))
+        object.__setattr__(
+            self,
+            "misfit_by_reflector",
+            _readonly(misfit_by_reflector, float),
+        )
         for name, value in arrays.items():
             object.__setattr__(self, name, _readonly(value, value.dtype))
         for name, value in optional_arrays.items():
@@ -440,10 +464,12 @@ def compute_vfsa_misfit(
         weights[:, None, None] * effective_shift * effective_shift,
         0.0,
     )
-    misfit_sum = float(np.sum(weighted_squared) / 2.0)
+    misfit_by_reflector = 0.5 * np.sum(weighted_squared, axis=(1, 2))
+    misfit_sum = float(np.sum(misfit_by_reflector))
 
     return MisfitResult(
         misfit_sum=misfit_sum,
+        misfit_by_reflector=misfit_by_reflector,
         shift_time=effective_shift,
         tracked_correlation=candidate_corr,
         window_energy_obs=energy_obs,

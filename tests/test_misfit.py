@@ -117,6 +117,8 @@ class MisfitStep6Tests(unittest.TestCase):
 
         # Sum objective: [5*1*1^2 + 5*3*2^2] / 2 = 32.5.
         self.assertAlmostEqual(result.misfit_sum, 32.5)
+        np.testing.assert_allclose(result.misfit_by_reflector, [2.5, 30.0])
+        self.assertEqual(result.misfit_sum, np.sum(result.misfit_by_reflector))
         self.assertAlmostEqual(result.misfit_mean, 3.25)
 
     def test_sum_objective_uses_all_fixed_residuals_without_normalisation(self) -> None:

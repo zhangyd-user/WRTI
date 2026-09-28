@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -8,6 +9,25 @@ from WRTI.correlation import CorrelationResult
 from WRTI.tracking import track_correlation_result, track_zncc
 from WRTI.tracking.tracker import _assert_path_continuity
 from WRTI.tracking import boundary_qc_mask, low_correlation_qc_mask, path_failure_mask
+from WRTI.tracking.quality import evaluate_dp_failure
+
+
+def _quality_tracking(low_quality_count: int, *, zigzag: bool):
+    count = 20
+    shift = (
+        # Turn amplitude is 0.016: above 0.3 * 0.04, below the former 0.5 * 0.04.
+        np.resize(np.array([0.0, 0.008]), count)
+        if zigzag
+        else np.zeros(count)
+    )
+    correlation = np.full(count, 0.9)
+    correlation[:low_quality_count] = 0.4
+    return SimpleNamespace(
+        success_mask=np.ones(count, dtype=bool),
+        path_index=np.arange(count),
+        shift_time=shift,
+        tracked_correlation=correlation,
+    )
 
 
 class TrackingStep5Tests(unittest.TestCase):
@@ -37,6 +57,26 @@ class TrackingStep5Tests(unittest.TestCase):
             dt=1.0,
             **kwargs,
         )
+
+    def test_direct_quality_collapse_at_45_percent_without_zigzag(self) -> None:
+        quality = evaluate_dp_failure(
+            _quality_tracking(9, zigzag=False), epsilon_time=0.04
+        )
+        self.assertTrue(quality.event_collapse)
+        self.assertEqual(quality.oscillation_index, 0.0)
+
+    def test_secondary_collapse_at_30_percent_with_zigzag(self) -> None:
+        quality = evaluate_dp_failure(
+            _quality_tracking(6, zigzag=True), epsilon_time=0.04
+        )
+        self.assertTrue(quality.event_collapse)
+        self.assertGreaterEqual(quality.oscillation_index, 0.5)
+
+    def test_zigzag_does_not_collapse_below_25_percent_low_quality(self) -> None:
+        quality = evaluate_dp_failure(
+            _quality_tracking(4, zigzag=True), epsilon_time=0.04
+        )
+        self.assertFalse(quality.event_collapse)
 
     def test_global_dp_recovers_a_smooth_strong_ridge(self) -> None:
         correlation = self._ridge_correlation()

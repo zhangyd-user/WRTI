@@ -1062,7 +1062,7 @@ def build_observed_centers_from_eikonal(
                         if quality_audit_config is None:
                             trace_valid[reflector, shot] = receiver_valid
                             continue
-                        failed_seed_times = [seed_time]
+                        failed_seed_times = []
                         last_failed_seed = None
                         last_failed_sparse = None
                         for _ in range(3):
@@ -1089,7 +1089,7 @@ def build_observed_centers_from_eikonal(
                                 flat,
                                 receiver_x=receivers[shot, :, 0],
                                 valid_receiver=receiver_valid,
-                                seed_receiver=i0,
+                                seed_receiver=(repaired_seed.seed_receiver if repaired_seed.seed_receiver >= 0 else i0),
                                 seed_time=repaired_seed.seed_time,
                                 state_valid=state_valid,
                                 escape_state_valid=escape_state_valid,
@@ -1109,7 +1109,7 @@ def build_observed_centers_from_eikonal(
                                 valid_receiver=receiver_valid,
                                 neighbor_similarity=repaired_sparse.neighbor_correlation,
                                 prediction_error=repaired_sparse.prediction_error,
-                                seed_receiver=i0,
+                                seed_receiver=repaired_sparse.seed_receiver,
                                 anchor_receiver_mask=repaired_seed.anchor_receiver_mask,
                                 tracking_usable_receiver=tracking_usable_receiver[reflector, shot],
                                 quality_available_receiver=quality_available_receiver[reflector, shot],
@@ -1123,7 +1123,7 @@ def build_observed_centers_from_eikonal(
                                 sparse = repaired_sparse
                                 seed_repair_success_count += 1
                                 break
-                            failed_seed_times.append(float(repaired_seed.seed_time))
+                            failed_seed_times.append((int(repaired_seed.seed_receiver), float(repaired_seed.seed_time)))
                         if sparse is None:
                             if last_failed_sparse is None:
                                 unrecoverable_mask[reflector, shot] = True
@@ -1175,7 +1175,7 @@ def build_observed_centers_from_eikonal(
                         flat,
                         receiver_x=receivers[shot, :, 0],
                         valid_receiver=receiver_valid,
-                        seed_receiver=i0,
+                        seed_receiver=(search_result.seed_receiver if search_result is not None and search_result.seed_receiver >= 0 else i0),
                         seed_time=tracked_seed,
                         state_valid=state_valid,
                         escape_state_valid=escape_state_valid,
@@ -1197,7 +1197,7 @@ def build_observed_centers_from_eikonal(
                         valid_receiver=receiver_valid,
                         neighbor_similarity=sparse.neighbor_correlation,
                         prediction_error=sparse.prediction_error,
-                        seed_receiver=i0,
+                        seed_receiver=sparse.seed_receiver,
                         anchor_receiver_mask=search_result.anchor_receiver_mask,
                         tracking_usable_receiver=tracking_usable_receiver[reflector, shot],
                         quality_available_receiver=quality_available_receiver[reflector, shot],
@@ -1213,7 +1213,7 @@ def build_observed_centers_from_eikonal(
                         initial_audit.status == TrackingStatus.SEED_ERROR
                         and not cascade_seed_to_break
                     ):
-                        failed_seed_times = [float(search_result.seed_time)]
+                        failed_seed_times = [(int(search_result.seed_receiver), float(search_result.seed_time))]
                         repaired = False
                         last_failed_seed = None
                         last_failed_sparse = None
@@ -1242,7 +1242,7 @@ def build_observed_centers_from_eikonal(
                                 flat,
                                 receiver_x=receivers[shot, :, 0],
                                 valid_receiver=receiver_valid,
-                                seed_receiver=i0,
+                                seed_receiver=(repaired_seed.seed_receiver if repaired_seed.seed_receiver >= 0 else i0),
                                 seed_time=repaired_seed.seed_time,
                                 state_valid=state_valid,
                                 escape_state_valid=escape_state_valid,
@@ -1261,7 +1261,7 @@ def build_observed_centers_from_eikonal(
                                 valid_receiver=receiver_valid,
                                 neighbor_similarity=repaired_sparse.neighbor_correlation,
                                 prediction_error=repaired_sparse.prediction_error,
-                                seed_receiver=i0,
+                                seed_receiver=repaired_sparse.seed_receiver,
                                 anchor_receiver_mask=repaired_seed.anchor_receiver_mask,
                                 tracking_usable_receiver=tracking_usable_receiver[reflector, shot],
                                 quality_available_receiver=quality_available_receiver[reflector, shot],
@@ -1295,7 +1295,7 @@ def build_observed_centers_from_eikonal(
                                 seed_repair_success_count += 1
                                 repaired = True
                                 break
-                            failed_seed_times.append(float(repaired_seed.seed_time))
+                            failed_seed_times.append((int(repaired_seed.seed_receiver), float(repaired_seed.seed_time)))
                         if not repaired:
                             if last_failed_sparse is None:
                                 unrecoverable_mask[reflector, shot] = True
