@@ -27,6 +27,8 @@ def save_tobs_bootstrap_diagnostic(
     receiver_x,
     control_receiver,
     control_time,
+    tracking_seed_receiver=None,
+    tracking_seed_time=None,
     eikonal_control_time=None,
     dt,
     t0=0.0,
@@ -91,15 +93,27 @@ def save_tobs_bootstrap_diagnostic(
     axes[0].plot(x, tref, color="tab:blue", linewidth=1.5, label="Eikonal Tref")
     axes[0].plot(x, new_tobs, color="tab:red", linewidth=1.5, label="Bootstrap Tobs")
     axes[0].scatter(x[i0], control_time, s=45, facecolor="white", edgecolor="black", zorder=5,
-                    label="Same-x control / DP seed")
+                    label="Same-x control")
+    seed_receiver = None if tracking_seed_receiver is None else int(tracking_seed_receiver)
+    seed_time = np.nan if tracking_seed_time is None else float(tracking_seed_time)
+    if seed_receiver is not None and 0 <= seed_receiver < nr and np.isfinite(seed_time):
+        axes[0].scatter(
+            x[seed_receiver], seed_time + moveout[seed_receiver], marker="*", s=90,
+            color="yellow", edgecolor="black", zorder=8, label="Actual production seed",
+        )
     axes[0].set_ylabel("Time (s)")
     axes[0].legend(loc="best", fontsize=8)
 
     axes[1].axhline(old_control, color="gold", linestyle="--", linewidth=1.2,
                     label="Eikonal global-min control")
     axes[1].axhline(float(control_time), color="tab:blue", linewidth=1.4,
-                    label="Same-x control / DP seed")
+                    label="Same-x control")
     axes[1].plot(x, flat_pick, color="tab:red", linewidth=1.5, label="Tracked flat path")
+    if seed_receiver is not None and 0 <= seed_receiver < nr and np.isfinite(seed_time):
+        axes[1].scatter(
+            x[seed_receiver], seed_time, marker="*", s=90, color="yellow",
+            edgecolor="black", zorder=8, label="Actual production seed",
+        )
     if rescue_used_mask is not None:
         rescue = np.asarray(rescue_used_mask, dtype=bool)
         axes[1].scatter(x[rescue], flat_pick[rescue], marker="^", s=45,
@@ -118,8 +132,6 @@ def save_tobs_bootstrap_diagnostic(
         if 0 <= int(stop) < nr:
             axes[1].axvline(x[int(stop)], color="tab:purple", linestyle=":", linewidth=1.2,
                             label="Stop receiver")
-    axes[1].scatter(x[i0], control_time, s=45, facecolor="white", edgecolor="black", zorder=5,
-                    label="Same-x control")
     axes[1].legend(loc="best", fontsize=8)
 
     if title:
@@ -142,6 +154,7 @@ def save_same_x_control_test(
     control_receiver,
     eikonal_control_time,
     same_x_control_time,
+    tracking_seed_receiver=None,
     tracking_seed_time=None,
     guide_pick_time,
     legacy_pick_time,
@@ -155,15 +168,21 @@ def save_same_x_control_test(
     tref = np.asarray(theoretical_traveltime, dtype=float)
     tobs = np.asarray(new_observed_center, dtype=float)
     x = np.asarray(receiver_x, dtype=float)
+    nref, nreceiver = tref.shape
     old_control = np.asarray(eikonal_control_time, dtype=float)
     new_control = np.asarray(same_x_control_time, dtype=float)
-    snapped_control = new_control if tracking_seed_time is None else np.asarray(tracking_seed_time, dtype=float)
+    actual_seed_time = new_control if tracking_seed_time is None else np.asarray(tracking_seed_time, dtype=float)
+    actual_seed_receiver = (
+        np.full(nref, int(control_receiver), dtype=int)
+        if tracking_seed_receiver is None
+        else np.asarray(tracking_seed_receiver, dtype=int)
+    )
     guide_time = np.asarray(guide_pick_time, dtype=float)
     legacy_time = np.asarray(legacy_pick_time, dtype=float)
-    nref, nreceiver = tref.shape
     if observed.ndim != 2 or observed.shape[0] != nreceiver or tobs.shape != tref.shape:
         raise ValueError("same-x diagnostic gather and time arrays have inconsistent shapes")
-    if (old_control.shape != (nref,) or new_control.shape != (nref,) or snapped_control.shape != (nref,)
+    if (old_control.shape != (nref,) or new_control.shape != (nref,) or actual_seed_time.shape != (nref,)
+            or actual_seed_receiver.shape != (nref,)
             or guide_time.shape != tref.shape or legacy_time.shape != tref.shape):
         raise ValueError("control-time arrays must contain one value per reflector")
 
@@ -190,15 +209,24 @@ def save_same_x_control_test(
         left.scatter(x[i0], old_control[reflector], marker="x", s=45, color="#E69F00",
                      label="Old Eikonal control", zorder=5)
         left.scatter(x[i0], new_control[reflector], s=50, facecolor="white",
-                     edgecolor="black", label="Same-x DP seed", zorder=5)
-        left.scatter(x[i0], snapped_control[reflector], s=38, color="#F0E442",
-                     edgecolor="black", label="Observed snapped seed", zorder=6)
+                     edgecolor="black", label="Same-x control", zorder=5)
+        seed_receiver = int(actual_seed_receiver[reflector])
+        if 0 <= seed_receiver < nreceiver and np.isfinite(actual_seed_time[reflector]):
+            left.scatter(
+                x[seed_receiver], actual_seed_time[reflector] + moveout[seed_receiver],
+                marker="*", s=90, color="#F0E442", edgecolor="black",
+                label="Actual production seed", zorder=8,
+            )
         right.axhline(old_control[reflector], color="#E69F00", linestyle="--",
                       linewidth=1.3, label="Old Eikonal control")
         right.axhline(new_control[reflector], color="#0072B2", linewidth=1.5,
                       label="Theoretical same-x control")
-        right.scatter(x[i0], snapped_control[reflector], s=38, color="#F0E442",
-                      edgecolor="black", label="Observed snapped seed", zorder=6)
+        if 0 <= seed_receiver < nreceiver and np.isfinite(actual_seed_time[reflector]):
+            right.scatter(
+                x[seed_receiver], actual_seed_time[reflector], marker="*", s=90,
+                color="#F0E442", edgecolor="black", label="Actual production seed",
+                zorder=8,
+            )
         right.plot(x, legacy_time[reflector], color="0.55", linestyle=":",
                    linewidth=1.1, label="Old envelope DP path")
         right.plot(x, guide_time[reflector], color="#009E73", linestyle="--",

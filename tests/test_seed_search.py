@@ -26,6 +26,93 @@ def _discover(flat, control, **overrides):
     return discover_tracking_seed(flat, **options)
 
 
+def _pilot_result(times, **overrides):
+    times = np.asarray(times, dtype=float)
+    size = times.size
+    values = dict(
+        passed=True,
+        coverage=1.0,
+        median_zncc=0.9,
+        median_abs_prediction_error=0.0,
+        median_abs_slope_ms_per_100m=0.0,
+        p90_abs_slope_ms_per_100m=0.0,
+        phase_switch_count=0,
+        pick_sample=np.rint(times * 1000).astype(int),
+        pick_time=times,
+        success_mask=np.ones(size, dtype=bool),
+        neighbor_zncc=np.full(size, 0.9),
+        residual_slope=np.zeros(size),
+        prediction_error=np.zeros(size),
+        tested_mask=np.ones(size, dtype=bool),
+        left_support=size // 2,
+        right_support=size // 2,
+        transition_count=0,
+    )
+    values.update(overrides)
+    return seed_search.SeedPilotResult(**values)
+
+
+def _short_evaluation(pilot, *, mode="LOCAL", seed_time=2.4):
+    size = pilot.pick_time.size
+    return seed_search._ShortSeedEvaluation(
+        mode=mode,
+        hypothesis_index=0,
+        seed_receiver=size // 2,
+        hypothesis=(seed_time, 0, 1.0, 1.0, 1.0),
+        pilot=pilot,
+        anchor_mask=np.ones(size, dtype=bool),
+        anchor_left=size // 2,
+        anchor_right=size - size // 2 - 1,
+        diffraction_risk=False,
+        control_divergence_risk=False,
+        left_signed_slope_ms_per_100m=0.0,
+        right_signed_slope_ms_per_100m=0.0,
+        macro_curvature_time=0.0,
+    )
+
+
+def test_control_divergence_detects_diffraction_flank_without_apex():
+    pilot = _pilot_result([2.40, 2.41, 2.43, 2.46, 2.50, 2.56])
+    assert seed_search._control_divergence_risk(pilot, 0, 2.40)
+
+
+def test_short_seed_rank_prefers_whole_pilot_control_consistency():
+    bad = _short_evaluation(_pilot_result(
+        [2.40] * 7,
+        median_zncc=0.95,
+        median_abs_control_error=0.045,
+        p90_abs_control_error=0.100,
+        median_abs_flatness_error=0.030,
+        p90_abs_flatness_error=0.080,
+    ))
+    good = _short_evaluation(_pilot_result(
+        [2.405] * 7,
+        median_zncc=0.85,
+        median_abs_control_error=0.006,
+        p90_abs_control_error=0.012,
+        median_abs_flatness_error=0.002,
+        p90_abs_flatness_error=0.004,
+    ), seed_time=2.405)
+    rank_options = dict(
+        base_seed=3,
+        control_time=2.40,
+        slope_quantum=1.0,
+        time_quantum=0.001,
+    )
+    assert seed_search._short_seed_rank(good, **rank_options) > seed_search._short_seed_rank(
+        bad, **rank_options
+    )
+
+
+def test_production_seed_avoids_rough_anchor_middle():
+    pilot = _pilot_result([2.400, 2.401, 2.402, 2.430, 2.403, 2.402, 2.401])
+    item = _short_evaluation(pilot)
+    receiver, _, _ = seed_search._production_seed_from_short(
+        item, control_time=2.400
+    )
+    assert receiver != 3
+
+
 def test_local_search_snaps_to_positive_main_peak_not_stronger_negative_lobe():
     time = np.arange(400) * 0.001
     flat = np.stack([_event(time, 0.220) for _ in range(25)])

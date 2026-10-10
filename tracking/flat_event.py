@@ -58,6 +58,16 @@ class SparseFlatTrackingResult:
     stop_receiver_left: int
     stop_receiver_right: int
     runtime_seconds: float
+    # Optional diagnostics populated only by the exact global Top-K solver.
+    solver_mode: str = "beam"
+    global_best_score: float = np.nan
+    global_second_score: float = np.nan
+    global_score_margin: float = np.nan
+    global_template_correlation: np.ndarray | None = None
+    global_consensus_fraction: np.ndarray | None = None
+    global_consensus_spread: np.ndarray | None = None
+    global_guide_time: np.ndarray | None = None
+    global_topk_scores: tuple[float, ...] = ()
 
 
 class TransitionKind(IntEnum):
@@ -1164,6 +1174,7 @@ def track_flattened_event_sparse(
     continuation_rescue=None,
     ownership_escape=None,
     slow_guide=None,
+    global_dp=None,
 ) -> SparseFlatTrackingResult:
     """Continue one event with local second-order DP plus an optional shared
     long-memory main-axis guide.
@@ -1223,6 +1234,8 @@ def track_flattened_event_sparse(
             raise ValueError("escape_state_valid must contain base state_valid")
 
     guide = dict(slow_guide or {})
+    global_cfg = dict(global_dp or {})
+    global_enabled = bool(global_cfg.get("enabled", False))
     default_slow_enabled = bool(
         anchor_receiver_mask is not None
         and np.any(np.asarray(anchor_receiver_mask, dtype=bool))
@@ -1376,36 +1389,72 @@ def track_flattened_event_sparse(
         slow_guide_protected_fast_weight_scale=slow_protected_fast_weight,
     )
 
-    left = _track_direction(
-        candidates,
-        x,
-        np.arange(seed, -1, -1),
-        max_slope=max_slope,
-        max_prediction_error=max_prediction_error_time,
-        min_zncc=min_neighbor_zncc,
-        hard_zncc_gate=bool(hard_neighbor_zncc_gate),
-        prediction_soft_scale=float(prediction_soft_scale_time),
-        prediction_penalty_weight=float(prediction_penalty_weight),
-        max_active_states=int(max_active_states),
-        phase_switch_zncc=float(phase_switch_zncc),
-        phase_switch_prediction_error=float(phase_switch_prediction_time),
-        **direction_options,
-    )
-    right = _track_direction(
-        candidates,
-        x,
-        np.arange(seed, nr),
-        max_slope=max_slope,
-        max_prediction_error=max_prediction_error_time,
-        min_zncc=min_neighbor_zncc,
-        hard_zncc_gate=bool(hard_neighbor_zncc_gate),
-        prediction_soft_scale=float(prediction_soft_scale_time),
-        prediction_penalty_weight=float(prediction_penalty_weight),
-        max_active_states=int(max_active_states),
-        phase_switch_zncc=float(phase_switch_zncc),
-        phase_switch_prediction_error=float(phase_switch_prediction_time),
-        **direction_options,
-    )
+    global_solution = None
+    if global_enabled:
+        from .flat_event_global import solve_global_topk_two_pass
+
+        global_solution = solve_global_topk_two_pass(
+            candidates,
+            receiver_x=x,
+            valid_receiver=valid,
+            seed_receiver=seed,
+            anchor_mask=anchor_mask,
+            state_valid=ownership,
+            escape_state_valid=(escape_ownership if escape_enabled else ownership),
+            config=global_cfg,
+            traces=traces,
+            candidate_envelope=candidate_envelope,
+            dt=float(dt),
+            t0=float(t0),
+            half_window_samples=half_window_samples,
+        )
+        left = (
+            dict(global_solution.left_selected),
+            global_solution.stop_reason_left,
+            global_solution.transition_count_left,
+            global_solution.correlation_count_left,
+            global_solution.active_state_max,
+            global_solution.left_diagnostic,
+        )
+        right = (
+            dict(global_solution.right_selected),
+            global_solution.stop_reason_right,
+            global_solution.transition_count_right,
+            global_solution.correlation_count_right,
+            global_solution.active_state_max,
+            global_solution.right_diagnostic,
+        )
+    else:
+        left = _track_direction(
+            candidates,
+            x,
+            np.arange(seed, -1, -1),
+            max_slope=max_slope,
+            max_prediction_error=max_prediction_error_time,
+            min_zncc=min_neighbor_zncc,
+            hard_zncc_gate=bool(hard_neighbor_zncc_gate),
+            prediction_soft_scale=float(prediction_soft_scale_time),
+            prediction_penalty_weight=float(prediction_penalty_weight),
+            max_active_states=int(max_active_states),
+            phase_switch_zncc=float(phase_switch_zncc),
+            phase_switch_prediction_error=float(phase_switch_prediction_time),
+            **direction_options,
+        )
+        right = _track_direction(
+            candidates,
+            x,
+            np.arange(seed, nr),
+            max_slope=max_slope,
+            max_prediction_error=max_prediction_error_time,
+            min_zncc=min_neighbor_zncc,
+            hard_zncc_gate=bool(hard_neighbor_zncc_gate),
+            prediction_soft_scale=float(prediction_soft_scale_time),
+            prediction_penalty_weight=float(prediction_penalty_weight),
+            max_active_states=int(max_active_states),
+            phase_switch_zncc=float(phase_switch_zncc),
+            phase_switch_prediction_error=float(phase_switch_prediction_time),
+            **direction_options,
+        )
 
     selected = dict(left[0])
     selected.update(right[0])
@@ -1530,6 +1579,33 @@ def track_flattened_event_sparse(
         stop_receiver_left=int(left[5]["stop_receiver"]),
         stop_receiver_right=int(right[5]["stop_receiver"]),
         runtime_seconds=perf_counter() - started,
+        solver_mode=("global_topk" if global_solution is not None else "beam"),
+        global_best_score=(
+            global_solution.best_score if global_solution is not None else np.nan
+        ),
+        global_second_score=(
+            global_solution.second_score if global_solution is not None else np.nan
+        ),
+        global_score_margin=(
+            global_solution.score_margin if global_solution is not None else np.nan
+        ),
+        global_template_correlation=(
+            global_solution.template_correlation if global_solution is not None else None
+        ),
+        global_consensus_fraction=(
+            global_solution.consensus_fraction if global_solution is not None else None
+        ),
+        global_consensus_spread=(
+            global_solution.consensus_spread if global_solution is not None else None
+        ),
+        global_guide_time=(
+            global_solution.guide_time if global_solution is not None else None
+        ),
+        global_topk_scores=(
+            tuple(path.score for path in global_solution.top_paths)
+            if global_solution is not None
+            else ()
+        ),
     )
 
 

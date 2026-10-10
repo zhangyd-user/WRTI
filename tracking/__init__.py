@@ -12,6 +12,15 @@ from .flat_event import (
     SparseFlatTrackingResult,
     track_flattened_event_sparse,
 )
+from .flat_event_global import (
+    DEFAULT_GLOBAL_DP,
+    GlobalDPPath,
+    GlobalDPSolution,
+    TrackingChallengeDecision,
+    TrackingChallengeScore,
+    compare_tracking_hypotheses,
+    solve_global_topk_two_pass,
+)
 from .quality import (
     boundary_qc_mask,
     dp_failure_mask,
@@ -48,6 +57,13 @@ __all__ = [
     "FlatEventCandidate",
     "SparseFlatTrackingResult",
     "track_flattened_event_sparse",
+    "DEFAULT_GLOBAL_DP",
+    "GlobalDPPath",
+    "GlobalDPSolution",
+    "TrackingChallengeDecision",
+    "TrackingChallengeScore",
+    "compare_tracking_hypotheses",
+    "solve_global_topk_two_pass",
     "SeedSearchResult",
     "discover_tracking_seed",
 ]

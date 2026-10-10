@@ -18,7 +18,9 @@ All Eikonal times are used only through their relative moveout.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import multiprocessing as mp
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from dataclasses import dataclass, fields
 from types import MappingProxyType
 from typing import Mapping
 
@@ -167,6 +169,7 @@ class ObservedCenterBootstrapResult:
     boundary_flag: np.ndarray
     control_receiver: np.ndarray
     control_time: np.ndarray
+    tracking_seed_receiver: np.ndarray
     tracking_seed_time: np.ndarray
     seed_snap_delta_time: np.ndarray
     seed_snap_success: np.ndarray
@@ -215,6 +218,7 @@ class ObservedCenterBootstrapResult:
         boundary = np.asarray(self.boundary_flag, dtype=bool)
         control_receiver = np.asarray(self.control_receiver, dtype=int)
         control_time = np.asarray(self.control_time, dtype=float)
+        tracking_seed_receiver = np.asarray(self.tracking_seed_receiver, dtype=int)
         tracking_seed_time = np.asarray(self.tracking_seed_time, dtype=float)
         seed_snap_delta_time = np.asarray(self.seed_snap_delta_time, dtype=float)
         seed_snap_success = np.asarray(self.seed_snap_success, dtype=bool)
@@ -258,7 +262,8 @@ class ObservedCenterBootstrapResult:
             raise TobsBootstrapError("control_receiver must have shape [nshot].")
         if control_time.shape != (shape[0], shape[1]):
             raise TobsBootstrapError("control_time must have shape [nref, nshot].")
-        for name, value in {"tracking_seed_time": tracking_seed_time, "seed_snap_delta_time": seed_snap_delta_time,
+        for name, value in {"tracking_seed_receiver": tracking_seed_receiver,
+                            "tracking_seed_time": tracking_seed_time, "seed_snap_delta_time": seed_snap_delta_time,
                             "seed_snap_success": seed_snap_success, "seed_snap_amplitude": seed_snap_amplitude}.items():
             if value.shape != control_time.shape:
                 raise TobsBootstrapError(f"{name} must have shape {control_time.shape}.")
@@ -294,6 +299,7 @@ class ObservedCenterBootstrapResult:
         object.__setattr__(self, "boundary_flag", _readonly(boundary, bool))
         object.__setattr__(self, "control_receiver", _readonly(control_receiver, int))
         object.__setattr__(self, "control_time", _readonly(control_time, float))
+        object.__setattr__(self, "tracking_seed_receiver", _readonly(tracking_seed_receiver, int))
         object.__setattr__(self, "tracking_seed_time", _readonly(tracking_seed_time, float))
         object.__setattr__(self, "seed_snap_delta_time", _readonly(seed_snap_delta_time, float))
         object.__setattr__(self, "seed_snap_success", _readonly(seed_snap_success, bool))
@@ -779,6 +785,49 @@ def _ownership_escape_bounds(predicted, upper, lower, fraction, maximum):
     return escape_upper, escape_lower
 
 
+def _run_bootstrap_shot(task):
+    shot, observed, tref, source, receivers, options = task
+    result = build_observed_centers_from_eikonal(
+        observed[None, ...],
+        tref[:, None, :],
+        source[None, ...],
+        receivers[None, ...],
+        workers=1,
+        **options,
+    )
+    payload = {field.name: getattr(result, field.name) for field in fields(result)}
+    payload["counts"] = dict(result.counts)
+    return shot, payload
+
+
+def _merge_bootstrap_shots(shot_results):
+    ordered = [result for _, result in sorted(shot_results)]
+    values = {}
+    for field in fields(ObservedCenterBootstrapResult):
+        if field.name == "counts":
+            continue
+        arrays = [np.asarray(result[field.name]) for result in ordered]
+        values[field.name] = np.concatenate(arrays, axis=0 if arrays[0].ndim == 1 else 1)
+
+    counts = {}
+    for key in ordered[0]["counts"]:
+        items = [result["counts"][key] for result in ordered]
+        if isinstance(items[0], np.ndarray):
+            counts[key] = np.concatenate(items, axis=0 if items[0].ndim == 1 else 1)
+        elif key == "tracked_by_reflector":
+            counts[key] = tuple(sum(values) for values in zip(*items))
+        elif key == "sparse_active_state_max":
+            counts[key] = max(items)
+        elif key == "median_anchor_length":
+            valid = values["seed_valid"]
+            lengths = values["anchor_left_count"] + values["anchor_right_count"] + 1
+            counts[key] = float(np.median(lengths[valid])) if np.any(valid) else 0.0
+        else:
+            counts[key] = sum(items)
+    values["counts"] = counts
+    return ObservedCenterBootstrapResult(**values)
+
+
 def build_observed_centers_from_eikonal(
     observed_data: np.ndarray,
     theoretical_traveltime: np.ndarray,
@@ -803,6 +852,7 @@ def build_observed_centers_from_eikonal(
     seed_search_options: Mapping[str, object] | None = None,
     boundary_margin_samples: int = 0,
     quality_audit_config=None,
+    workers: int = 1,
 ) -> ObservedCenterBootstrapResult:
     """Construct frozen ``Tobs`` directly from observed data and Eikonal times.
 
@@ -841,6 +891,66 @@ def build_observed_centers_from_eikonal(
     if supplied_control_time.shape != (nref, nshot):
         raise TobsBootstrapError("control_time must have shape [nref, nshot].")
 
+    worker_count = min(int(workers), nshot)
+    if worker_count < 1:
+        raise TobsBootstrapError("workers must be a positive integer.")
+    if worker_count > 1:
+        options = {
+            "dt": dt,
+            "t0": t0,
+            "epsilon_time": epsilon_time,
+            "slope_penalty": slope_penalty,
+            "refine_radius_samples": refine_radius_samples,
+            "tracking_method": tracking_method,
+            "sparse_tracking_options": sparse_tracking_options,
+            "ownership_enabled": ownership_enabled,
+            "ownership_overlap_fraction": ownership_overlap_fraction,
+            "ownership_edge_fraction": ownership_edge_fraction,
+            "seed_snap_enabled": seed_snap_enabled,
+            "seed_snap_half_width_time": seed_snap_half_width_time,
+            "compute_legacy_dense_diagnostic": compute_legacy_dense_diagnostic,
+            "legacy_dense_diagnostic_shots": legacy_dense_diagnostic_shots,
+            "seed_search_options": seed_search_options,
+            "boundary_margin_samples": boundary_margin_samples,
+            "quality_audit_config": quality_audit_config,
+        }
+        tasks = iter(
+            (
+                shot,
+                observed[shot],
+                tref[:, shot],
+                sources[shot],
+                receivers[shot],
+                {**options, "control_time": supplied_control_time[:, shot, None]},
+            )
+            for shot in range(nshot)
+        )
+        results = []
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=mp.get_context("spawn"),
+        ) as executor:
+            pending = {}
+            for _ in range(worker_count):
+                task = next(tasks, None)
+                if task is None:
+                    break
+                pending[executor.submit(_run_bootstrap_shot, task)] = task[0]
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    shot = pending.pop(future)
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:
+                        raise TobsBootstrapError(
+                            f"Tobs bootstrap worker failed for shot {shot}: {exc}"
+                        ) from exc
+                    task = next(tasks, None)
+                    if task is not None:
+                        pending[executor.submit(_run_bootstrap_shot, task)] = task[0]
+        return _merge_bootstrap_shots(results)
+
     center = np.full(tref.shape, np.nan, dtype=float)
     tracking_success = np.zeros(tref.shape, dtype=bool)
     trace_valid = np.zeros(tref.shape, dtype=bool)
@@ -878,6 +988,7 @@ def build_observed_centers_from_eikonal(
     boundary_flag = np.zeros(tref.shape, dtype=bool)
     control_receiver = np.empty(nshot, dtype=int)
     used_control_time = np.full((nref, nshot), np.nan, dtype=float)
+    tracking_seed_receiver = np.full((nref, nshot), -1, dtype=int)
     tracking_seed_time = np.full((nref, nshot), np.nan, dtype=float)
     seed_snap_delta_time = np.full((nref, nshot), np.nan, dtype=float)
     seed_snap_success = np.zeros((nref, nshot), dtype=bool)
@@ -970,6 +1081,10 @@ def build_observed_centers_from_eikonal(
                 from ..tracking.flat_event import track_flattened_event_sparse
 
                 tracker_cfg = dict(sparse_tracking_options or {})
+                # Exact global DP is only for full continuation. Seed-search
+                # pilots continue using the fast legacy tracker so exhaustive
+                # seed search does not multiply the global-DP cost.
+                global_dp_cfg = tracker_cfg.pop("global_dp", None)
                 seed_cfg = dict(seed_search_options or {})
                 ownership_escape_cfg = dict(tracker_cfg.pop("ownership_escape", {}) or {})
                 # Accept continuation_rescue from either config block, but pass
@@ -1100,6 +1215,7 @@ def build_observed_centers_from_eikonal(
                                 t0=t0,
                                 continuation_rescue=continuation_rescue_cfg,
                                 ownership_escape=ownership_escape_cfg,
+                                global_dp=global_dp_cfg,
                                 **tracker_cfg,
                             )
                             repaired_success = repaired_sparse.success_mask & np.isfinite(moveout)
@@ -1186,6 +1302,7 @@ def build_observed_centers_from_eikonal(
                         t0=t0,
                         continuation_rescue=continuation_rescue_cfg,
                         ownership_escape=ownership_escape_cfg,
+                        global_dp=global_dp_cfg,
                         **tracker_cfg,
                     )
                 if quality_audit_config is not None and search_result is not None:
@@ -1253,6 +1370,7 @@ def build_observed_centers_from_eikonal(
                                 t0=t0,
                                 continuation_rescue=continuation_rescue_cfg,
                                 ownership_escape=ownership_escape_cfg,
+                                global_dp=global_dp_cfg,
                                 **tracker_cfg,
                             )
                             repaired_success = repaired_sparse.success_mask & np.isfinite(moveout)
@@ -1393,11 +1511,53 @@ def build_observed_centers_from_eikonal(
                             tracking_break_merged_raw_audit[reflector, shot] = repair.audit.status.value
                         tracking_break_repair_success[reflector, shot] = repair.success
                         if repair.success:
-                            sparse = repair.tracking
-                            if cascade_seed_to_break:
-                                tracked_seed = break_control_time
-                                tracking_seed_time[reflector, shot] = tracked_seed
-                                seed_search_mode[reflector, shot] = search_result.mode
+                            use_repair = True
+                            if (
+                                getattr(sparse, "solver_mode", "beam") == "global_topk"
+                                and global_dp_cfg
+                                and bool(global_dp_cfg.get("enabled", False))
+                            ):
+                                from ..tracking.flat_event_global import compare_tracking_hypotheses
+
+                                challenge = compare_tracking_hypotheses(
+                                    flat_gather=flat,
+                                    receiver_x=receivers[shot, :, 0],
+                                    valid_receiver=(
+                                        tracking_usable_receiver[reflector, shot]
+                                        & receiver_valid
+                                    ),
+                                    incumbent_pick_sample=sparse.pick_sample,
+                                    incumbent_success_mask=sparse.success_mask,
+                                    challenger_pick_sample=repair.tracking.pick_sample,
+                                    challenger_success_mask=repair.tracking.success_mask,
+                                    anchor_receiver_mask=search_result.anchor_receiver_mask,
+                                    anchor_pick_sample=search_result.anchor_pick_sample,
+                                    coherence_half_window_time=float(
+                                        tracker_cfg.get("coherence_half_window_time", 0.040)
+                                    ),
+                                    dt=dt,
+                                    config=global_dp_cfg,
+                                )
+                                use_repair = challenge.use_challenger
+                                print(
+                                    f"[GLOBAL-vs-REPAIR] R{reflector + 1} shot {shot + 1} "
+                                    f"incumbent={challenge.incumbent.total:.4f} "
+                                    f"challenger={challenge.challenger.total:.4f} "
+                                    f"delta={challenge.improvement:.4f} "
+                                    f"winner={'repair' if use_repair else 'global'}",
+                                    flush=True,
+                                )
+                            if use_repair:
+                                sparse = repair.tracking
+                                if cascade_seed_to_break:
+                                    tracked_seed = break_control_time
+                                    tracking_seed_time[reflector, shot] = tracked_seed
+                                    seed_search_mode[reflector, shot] = search_result.mode
+                            else:
+                                # The old repair may satisfy its local audit while
+                                # losing reflector identity. Keep the better global
+                                # hypothesis but keep the shot flagged unresolved.
+                                unrecoverable_mask[reflector, shot] = True
                         else:
                             unrecoverable_mask[reflector, shot] = True
                 sparse_totals["transitions"] += sparse.transition_count
@@ -1433,6 +1593,8 @@ def build_observed_centers_from_eikonal(
                     "current Tobs bootstrap."
                 )
             tracking = sparse
+            tracking_seed_receiver[reflector, shot] = int(sparse.seed_receiver)
+            tracking_seed_time[reflector, shot] = float(sparse.seed_time)
             success = tracking.success_mask & np.isfinite(moveout)
             center[reflector, shot, success] = (
                 tracking.pick_time[success] + moveout[success]
@@ -1552,6 +1714,7 @@ def build_observed_centers_from_eikonal(
         boundary_flag=boundary_flag,
         control_receiver=control_receiver,
         control_time=used_control_time,
+        tracking_seed_receiver=tracking_seed_receiver,
         tracking_seed_time=tracking_seed_time,
         seed_snap_delta_time=seed_snap_delta_time,
         seed_snap_success=seed_snap_success,

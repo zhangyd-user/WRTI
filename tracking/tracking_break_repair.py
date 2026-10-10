@@ -821,6 +821,58 @@ def _best_segments(pool, domain):
     return tuple(selected), union, float(rank[0])
 
 
+def _localized_original_only_recovery(
+    *, original_tracking, preserved_segments, preserved_mask, available,
+    anchor_mask, config,
+):
+    available = np.asarray(available, dtype=bool)
+    trusted = np.asarray(preserved_mask, dtype=bool) & available
+    anchor = np.asarray(anchor_mask, dtype=bool) & available
+    quality_count = int(np.count_nonzero(available))
+    coverage = (
+        float(np.count_nonzero(trusted) / quality_count)
+        if quality_count else 0.0
+    )
+    if coverage < 0.80 or not preserved_segments or len(preserved_segments) > 2:
+        return False, "INSUFFICIENT_TRUSTED_ORIGINAL"
+
+    missing_runs = _runs(available & ~trusted)
+    if not missing_runs:
+        return True, "ORIGINAL_ALREADY_TRUSTED"
+
+    aperture = np.flatnonzero(available)
+    if not aperture.size:
+        return False, "NO_AVAILABLE_RECEIVERS"
+    aperture_left, aperture_right = map(int, aperture[[0, -1]])
+    max_hole = int(config.quality_window_receivers)
+    bridge_limit = 2.0 * float(config.severe_bad_prediction_error_time)
+    picks = np.asarray(original_tracking.pick_time, dtype=float)
+    trusted_receivers = trusted & np.isfinite(picks)
+    edge_count = max(2, max_hole // 2)
+
+    for run in missing_runs:
+        start, end = map(int, run[[0, -1]])
+        if start <= aperture_left or end >= aperture_right:
+            return False, "APERTURE_EDGE_BREAK"
+        if end - start + 1 > max_hole:
+            return False, "INTERIOR_BREAK_TOO_LONG"
+        if np.any(anchor[start:end + 1]):
+            return False, "ANCHOR_OVERLAPS_BREAK"
+
+        left = np.flatnonzero(trusted_receivers[:start])[-edge_count:]
+        right = np.flatnonzero(trusted_receivers[end + 1:])[:edge_count] + end + 1
+        if left.size < 2 or right.size < 2:
+            return False, "INSUFFICIENT_BRIDGE_SUPPORT"
+        left_time = float(np.median(picks[left]))
+        right_time = float(np.median(picks[right]))
+        if not np.isfinite(left_time) or not np.isfinite(right_time):
+            return False, "NONFINITE_BRIDGE_TIME"
+        if abs(right_time - left_time) > bridge_limit:
+            return False, "DISCONNECTED_INTERIOR_BREAK"
+
+    return True, "LOCALIZED_INTERIOR_BREAK"
+
+
 def _macro_smoothness_mask(receiver_x, tracking, trusted_mask, macro_window, residual_limit_time):
     """Large-scale smoothness check for any trusted path mask.
 
@@ -1620,6 +1672,39 @@ def repair_tracking_break(
     if anchor_trusted:
         preserved, preserved_mask, coverage = _best_segments(original_segments, available)
         required_sides = _required_repair_sides(original_audit)
+
+        localized_ok, localized_reason = _localized_original_only_recovery(
+            original_tracking=original_tracking,
+            preserved_segments=preserved,
+            preserved_mask=preserved_mask,
+            available=available,
+            anchor_mask=original_anchor_mask,
+            config=config,
+        )
+        if localized_ok:
+            composite = _composite_tracking(original_tracking, preserved, preserved_mask)
+            diagnostic_audit = audit_rkshot(
+                success_mask=composite.success_mask,
+                valid_receiver=valid_receiver,
+                neighbor_similarity=composite.neighbor_correlation,
+                prediction_error=composite.prediction_error,
+                seed_receiver=original_seed_receiver,
+                anchor_receiver_mask=original_anchor_mask,
+                tracking_usable_receiver=usable,
+                quality_available_receiver=available,
+                config=config,
+                reflector=reflector,
+            )
+            print(f"{prefix} RESULT = SUCCESS", flush=True)
+            print("  identity_mode = LOCALIZED_ORIGINAL_ONLY", flush=True)
+            print(f"  reason = {localized_reason}", flush=True)
+            print(f"  selected_segments = {len(preserved)}", flush=True)
+            print(f"  trusted_union_coverage = {coverage:.3f}", flush=True)
+            return TrackingBreakRepairResult(
+                composite, diagnostic_audit, original_segments, tuple(preserved),
+                preserved_mask, coverage, (), (), (),
+                ("full:LOCALIZED_ORIGINAL_ONLY",), 0, 0, 0,
+            )
     else:
         # The original seed/anchor cannot certify reflector identity.  Do not
         # preserve ORIGINAL as final evidence; independently repair both ends.

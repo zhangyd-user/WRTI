@@ -49,6 +49,10 @@ class SeedPilotResult:
     left_signed_slope_ms_per_100m: float = np.nan
     right_signed_slope_ms_per_100m: float = np.nan
     macro_curvature_time: float = np.nan
+    median_abs_control_error: float = np.nan
+    p90_abs_control_error: float = np.nan
+    median_abs_flatness_error: float = np.nan
+    p90_abs_flatness_error: float = np.nan
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,10 @@ class SeedSearchResult:
     macro_curvature_time: float = np.nan
     left_signed_slope_ms_per_100m: float = np.nan
     right_signed_slope_ms_per_100m: float = np.nan
+    control_divergence_risk: bool = False
+    pilot_median_abs_control_error: float = np.nan
+    pilot_p90_abs_control_error: float = np.nan
+    pilot_p90_abs_flatness_error: float = np.nan
 
 
 @dataclass(frozen=True)
@@ -377,6 +385,58 @@ def _diffraction_risk(
     return apex_like, left, right, curvature
 
 
+def _control_divergence_risk(
+    pilot,
+    seed,
+    control_time,
+    *,
+    min_points_per_side=3,
+    min_growth_time=0.020,
+    outer_error_time=0.040,
+):
+    """Detect a diffraction flank that crosses the control line only locally."""
+    if control_time is None or not np.isfinite(float(control_time)):
+        return False
+
+    success = (
+        np.asarray(pilot.success_mask, dtype=bool)
+        & np.asarray(pilot.tested_mask, dtype=bool)
+        & np.isfinite(pilot.pick_time)
+    )
+    seed = int(seed)
+    min_points = max(2, int(min_points_per_side))
+
+    for direction in (-1, 1):
+        if direction < 0:
+            indices = np.flatnonzero(
+                success & (np.arange(success.size) < seed)
+            )[::-1]
+        else:
+            indices = np.flatnonzero(
+                success & (np.arange(success.size) > seed)
+            )
+        if indices.size < min_points:
+            continue
+
+        errors = np.abs(
+            np.asarray(pilot.pick_time[indices], dtype=float)
+            - float(control_time)
+        )
+        errors = errors[np.isfinite(errors)]
+        if errors.size < min_points:
+            continue
+
+        block = max(1, errors.size // 3)
+        inner_error = float(np.median(errors[:block]))
+        outer_error = float(np.median(errors[-block:]))
+        if (
+            outer_error >= float(outer_error_time)
+            and outer_error - inner_error >= float(min_growth_time)
+        ):
+            return True
+    return False
+
+
 
 def _quantize(value, step, *, default=np.inf):
     """Stable rank value that is insensitive to floating round-off noise."""
@@ -400,6 +460,8 @@ def _pilot(
     min_median_zncc,
     phase_zncc,
     phase_prediction,
+    *,
+    control_time=None,
 ):
     """Run one pilot without jumping across muted/invalid receiver gaps."""
     subset = np.asarray(subset, dtype=int)
@@ -487,6 +549,20 @@ def _pilot(
     median_prediction = float(np.median(prediction)) if prediction.size else np.inf
     median_slope = float(np.median(slopes)) if slopes.size else np.inf
     p90_slope = float(np.percentile(slopes, 90.0)) if slopes.size else np.inf
+    used_times = np.asarray(tracked.pick_time[used_local], dtype=float)
+    used_times = used_times[np.isfinite(used_times)]
+    median_abs_control_error = np.nan
+    p90_abs_control_error = np.nan
+    median_abs_flatness_error = np.nan
+    p90_abs_flatness_error = np.nan
+    if used_times.size:
+        flatness_error = np.abs(used_times - float(np.median(used_times)))
+        median_abs_flatness_error = float(np.median(flatness_error))
+        p90_abs_flatness_error = float(np.percentile(flatness_error, 90.0))
+        if control_time is not None and np.isfinite(float(control_time)):
+            control_error = np.abs(used_times - float(control_time))
+            median_abs_control_error = float(np.median(control_error))
+            p90_abs_control_error = float(np.percentile(control_error, 90.0))
     passed = (
         bool(side_ok)
         and coverage >= float(min_coverage)
@@ -517,6 +593,10 @@ def _pilot(
         left_signed_slope_ms_per_100m=left_signed,
         right_signed_slope_ms_per_100m=right_signed,
         macro_curvature_time=curvature,
+        median_abs_control_error=median_abs_control_error,
+        p90_abs_control_error=p90_abs_control_error,
+        median_abs_flatness_error=median_abs_flatness_error,
+        p90_abs_flatness_error=p90_abs_flatness_error,
     )
 
 
@@ -1029,6 +1109,7 @@ class _ShortSeedEvaluation:
     anchor_left: int
     anchor_right: int
     diffraction_risk: bool
+    control_divergence_risk: bool
     left_signed_slope_ms_per_100m: float
     right_signed_slope_ms_per_100m: float
     macro_curvature_time: float
@@ -1041,25 +1122,92 @@ class _LongSeedEvaluation:
     rank: tuple
 
 
-def _production_seed_from_short(item: _ShortSeedEvaluation):
-    indices = np.flatnonzero(item.anchor_mask)
+def _production_seed_from_short(item: _ShortSeedEvaluation, *, control_time=None):
+    """Choose the most stable interior anchor sample."""
+    indices = np.flatnonzero(
+        np.asarray(item.anchor_mask, dtype=bool)
+        & np.asarray(item.pilot.success_mask, dtype=bool)
+        & np.isfinite(item.pilot.pick_time)
+    )
     if indices.size == 0:
         return -1, -1, np.nan
-    receiver = int(indices[len(indices) // 2])
+    if indices.size <= 2:
+        receiver = int(indices[len(indices) // 2])
+        return receiver, int(item.pilot.pick_sample[receiver]), float(
+            item.pilot.pick_time[receiver]
+        )
+
+    finite_prediction = np.abs(
+        np.asarray(item.pilot.prediction_error[indices], dtype=float)
+    )
+    finite_prediction = finite_prediction[np.isfinite(finite_prediction)]
+    prediction_default = (
+        float(np.median(finite_prediction)) if finite_prediction.size else 0.0
+    )
+    finite_rho = np.asarray(item.pilot.neighbor_zncc[indices], dtype=float)
+    finite_rho = finite_rho[np.isfinite(finite_rho)]
+    rho_default = float(np.median(finite_rho)) if finite_rho.size else 0.0
+    geometric_center = float(np.median(indices))
+
+    def score(receiver):
+        receiver = int(receiver)
+        position = int(np.flatnonzero(indices == receiver)[0])
+        previous_receiver = int(indices[position - 1])
+        next_receiver = int(indices[position + 1])
+        t0 = float(item.pilot.pick_time[previous_receiver])
+        t1 = float(item.pilot.pick_time[receiver])
+        t2 = float(item.pilot.pick_time[next_receiver])
+        roughness = abs(t0 - 2.0 * t1 + t2)
+        control_error = (
+            abs(t1 - float(control_time))
+            if control_time is not None and np.isfinite(float(control_time))
+            else 0.0
+        )
+        prediction = float(item.pilot.prediction_error[receiver])
+        prediction_error = (
+            abs(prediction) if np.isfinite(prediction) else prediction_default
+        )
+        rho = float(item.pilot.neighbor_zncc[receiver])
+        if not np.isfinite(rho):
+            rho = rho_default
+        return (
+            roughness,
+            control_error,
+            prediction_error,
+            -rho,
+            abs(receiver - geometric_center),
+        )
+
+    receiver = int(min(indices[1:-1], key=score))
     sample = int(item.pilot.pick_sample[receiver])
     time = float(item.pilot.pick_time[receiver])
     return receiver, sample, time
+
+
+def _pilot_geometry_rank(pilot, *, mode, time_quantum):
+    """Prefer a complete flat/control-consistent pilot over a local crossing."""
+    median_control = _quantize(pilot.median_abs_control_error, time_quantum)
+    p90_control = _quantize(pilot.p90_abs_control_error, time_quantum)
+    median_flatness = _quantize(pilot.median_abs_flatness_error, time_quantum)
+    p90_flatness = _quantize(pilot.p90_abs_flatness_error, time_quantum)
+    if mode == "LOCAL":
+        return -p90_control, -median_control, -p90_flatness, -median_flatness
+    return -p90_flatness, -median_flatness, -median_control, -p90_control
 
 
 def _short_seed_rank(item, *, base_seed, control_time, slope_quantum, time_quantum):
     hypothesis = item.hypothesis
     pilot = item.pilot
     return (
-        -_quantize(abs(hypothesis[0] - float(control_time)), time_quantum),
+        *_pilot_geometry_rank(
+            pilot, mode=item.mode, time_quantum=time_quantum
+        ),
+        -int(bool(item.control_divergence_risk)),
         pilot.coverage,
         pilot.median_zncc,
         -_quantize(pilot.p90_abs_slope_ms_per_100m, slope_quantum),
         -pilot.median_abs_prediction_error,
+        -_quantize(abs(hypothesis[0] - float(control_time)), time_quantum),
         hypothesis[3],
         hypothesis[4],
         int(item.anchor_left + item.anchor_right + 1),
@@ -1151,7 +1299,9 @@ def _apply_failed_seed_exclusions(
 
         matches = []
         for item in remaining:
-            production_receiver, _, production_time = _production_seed_from_short(item)
+            production_receiver, _, production_time = _production_seed_from_short(
+                item, control_time=float(control_time)
+            )
             if not np.isfinite(production_time):
                 continue
             if abs(production_time - failed_time) > float(tolerance_time):
@@ -1230,6 +1380,10 @@ def discover_tracking_seed(
     diffraction_max_macro_curvature_time=0.020,
     diffraction_min_opposite_slope_ms_per_100m=15.0,
     diffraction_min_points_per_side=3,
+    control_divergence_reject_enabled=True,
+    control_divergence_min_growth_time=0.020,
+    control_divergence_outer_error_time=0.040,
+    control_divergence_min_points_per_side=3,
     # Quantised ranking avoids tiny floating-point differences moving a
     # perfectly equivalent event away from same-x.
     seed_rank_slope_quantum_ms_per_100m=1.0,
@@ -1442,6 +1596,7 @@ def discover_tracking_seed(
                     pilot_min_median_zncc,
                     phase_switch_zncc,
                     phase_switch_prediction_time,
+                    control_time=float(control_time),
                 )
                 if short is None:
                     continue
@@ -1472,7 +1627,27 @@ def discover_tracking_seed(
                     ),
                     min_points_per_side=int(diffraction_min_points_per_side),
                 )
+                control_risk = _control_divergence_risk(
+                    short,
+                    seed,
+                    float(control_time),
+                    min_points_per_side=int(
+                        control_divergence_min_points_per_side
+                    ),
+                    min_growth_time=float(
+                        control_divergence_min_growth_time
+                    ),
+                    outer_error_time=float(
+                        control_divergence_outer_error_time
+                    ),
+                )
                 if bool(diffraction_reject_enabled) and risk:
+                    continue
+                if (
+                    bool(control_divergence_reject_enabled)
+                    and mode == "LOCAL"
+                    and control_risk
+                ):
                     continue
                 collected.append(
                     _ShortSeedEvaluation(
@@ -1485,6 +1660,7 @@ def discover_tracking_seed(
                         anchor_left=left,
                         anchor_right=right,
                         diffraction_risk=risk,
+                        control_divergence_risk=control_risk,
                         left_signed_slope_ms_per_100m=left_signed,
                         right_signed_slope_ms_per_100m=right_signed,
                         macro_curvature_time=curvature,
@@ -1561,15 +1737,18 @@ def discover_tracking_seed(
                 pilot_min_median_zncc,
                 phase_switch_zncc,
                 phase_switch_prediction_time,
+                control_time=float(control_time),
             )
             if long is None:
                 continue
             transitions += long.transition_count
             rank = (
-                -_quantize(
-                    abs(member.hypothesis[0] - float(control_time)),
-                    time_quantum,
+                *_pilot_geometry_rank(
+                    long,
+                    mode=member.mode,
+                    time_quantum=time_quantum,
                 ),
+                -int(bool(member.control_divergence_risk)),
                 long.coverage,
                 -long.phase_switch_count,
                 long.median_zncc,
@@ -1577,6 +1756,10 @@ def discover_tracking_seed(
                     long.p90_abs_slope_ms_per_100m, slope_quantum
                 ),
                 -long.median_abs_prediction_error,
+                -_quantize(
+                    abs(member.hypothesis[0] - float(control_time)),
+                    time_quantum,
+                ),
                 member.hypothesis[3],
                 member.hypothesis[4],
                 int(member.anchor_left + member.anchor_right + 1),
@@ -1591,7 +1774,9 @@ def discover_tracking_seed(
         short_item = selected.short
         pilot = selected.pilot
         production_seed, production_sample, production_time = (
-            _production_seed_from_short(short_item)
+            _production_seed_from_short(
+                short_item, control_time=float(control_time)
+            )
         )
         if production_seed < 0 or production_sample < 0:
             return None
@@ -1654,6 +1839,18 @@ def discover_tracking_seed(
             ),
             right_signed_slope_ms_per_100m=float(
                 short_item.right_signed_slope_ms_per_100m
+            ),
+            control_divergence_risk=bool(
+                short_item.control_divergence_risk
+            ),
+            pilot_median_abs_control_error=float(
+                pilot.median_abs_control_error
+            ),
+            pilot_p90_abs_control_error=float(
+                pilot.p90_abs_control_error
+            ),
+            pilot_p90_abs_flatness_error=float(
+                pilot.p90_abs_flatness_error
             ),
         )
 

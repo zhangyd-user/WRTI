@@ -6,6 +6,7 @@ from WRTI.tracking.quality_control import QualityAuditConfig
 from WRTI.tracking.tracking_break_repair import (
     _best_segments,
     _boundary_receivers,
+    _localized_original_only_recovery,
     evaluate_trusted_quality,
     extract_seed_connected_trusted_prefix,
     extract_trusted_segments,
@@ -91,6 +92,58 @@ def test_best_combination_uses_at_most_two_segments():
         ))
     selected, _, _ = _best_segments(segments, usable)
     assert len(selected) <= 2
+
+
+def test_localized_original_only_recovery_accepts_short_internal_hole():
+    available = np.ones(40, dtype=bool)
+    trusted = available.copy()
+    trusted[18:22] = False
+    tracking = _tracking(40)
+    tracking.pick_time = np.arange(40) * 0.001
+
+    passed, reason = _localized_original_only_recovery(
+        original_tracking=tracking,
+        preserved_segments=(object(), object()),
+        preserved_mask=trusted,
+        available=available,
+        anchor_mask=np.zeros(40, dtype=bool),
+        config=QualityAuditConfig(),
+    )
+
+    assert passed
+    assert reason == "LOCALIZED_INTERIOR_BREAK"
+
+
+def test_localized_original_only_recovery_rejects_edge_or_disconnected_hole():
+    available = np.ones(40, dtype=bool)
+    tracking = _tracking(40)
+
+    edge_trusted = available.copy()
+    edge_trusted[:4] = False
+    passed, reason = _localized_original_only_recovery(
+        original_tracking=tracking,
+        preserved_segments=(object(),),
+        preserved_mask=edge_trusted,
+        available=available,
+        anchor_mask=np.zeros(40, dtype=bool),
+        config=QualityAuditConfig(),
+    )
+    assert not passed
+    assert reason == "APERTURE_EDGE_BREAK"
+
+    disconnected = available.copy()
+    disconnected[18:22] = False
+    tracking.pick_time[22:] += 0.1
+    passed, reason = _localized_original_only_recovery(
+        original_tracking=tracking,
+        preserved_segments=(object(), object()),
+        preserved_mask=disconnected,
+        available=available,
+        anchor_mask=np.zeros(40, dtype=bool),
+        config=QualityAuditConfig(),
+    )
+    assert not passed
+    assert reason == "DISCONNECTED_INTERIOR_BREAK"
 
 
 def test_trusted_segment_endpoints_are_successful_receivers():

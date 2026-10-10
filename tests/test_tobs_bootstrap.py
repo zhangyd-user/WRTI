@@ -122,6 +122,37 @@ def _small_sparse_bootstrap(**kwargs):
     )
 
 
+def test_parallel_bootstrap_matches_serial():
+    dt = 0.001
+    time = np.arange(300) * dt
+    gather = np.stack([_pulse(time, 0.12) for _ in range(5)])
+    observed = np.stack([gather, gather])
+    tref = np.full((1, 2, 5), 0.10)
+    sources = np.array([[20.0, 0.0], [20.0, 0.0]])
+    receivers = np.zeros((2, 5, 2))
+    receivers[:, :, 0] = np.arange(5) * 10.0
+    options = {
+        "control_time": np.full((1, 2), 0.10),
+        "dt": dt,
+        "tracking_method": "sparse_event_dp",
+        "sparse_tracking_options": {
+            "candidate_min_prominence": 0.01,
+            "coherence_half_window_time": 0.01,
+            "max_prediction_error_time": 0.05,
+        },
+    }
+    serial = build_observed_centers_from_eikonal(
+        observed, tref, sources, receivers, workers=1, **options
+    )
+    parallel = build_observed_centers_from_eikonal(
+        observed, tref, sources, receivers, workers=2, **options
+    )
+    np.testing.assert_allclose(parallel.observed_center, serial.observed_center)
+    np.testing.assert_array_equal(parallel.tracking_success, serial.tracking_success)
+    assert parallel.counts["tracked_slots"] == serial.counts["tracked_slots"]
+    assert parallel.counts["tracked_by_reflector"] == serial.counts["tracked_by_reflector"]
+
+
 def test_sparse_without_diagnostic_never_calls_dense(monkeypatch):
     monkeypatch.setattr(bootstrap_module, "track_flattened_event",
                         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dense called")))
@@ -129,6 +160,7 @@ def test_sparse_without_diagnostic_never_calls_dense(monkeypatch):
     assert result.counts["dense_diagnostic_call_count"] == 0
     assert np.isnan(result.legacy_pick_time).all()
     assert np.isclose(result.observed_center[0, 0, 2], result.tracking_seed_time[0, 0])
+    assert result.tracking_seed_receiver[0, 0] == 2
 
 
 def test_sparse_never_runs_abandoned_dense_diagnostic(monkeypatch):
@@ -349,6 +381,8 @@ def test_comparison_plot_is_written(tmp_path):
         receiver_x=x,
         control_receiver=2,
         control_time=0.60,
+        tracking_seed_receiver=3,
+        tracking_seed_time=0.61,
         dt=dt,
     )
 

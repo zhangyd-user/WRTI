@@ -106,6 +106,8 @@ class WRTIConfig:
     flat_prediction_penalty_weight: float = 0.20
     flat_max_prediction_error_time: float = 0.050
     flat_max_active_states: int = 2000
+    # Nested quality-first global solver options.
+    flat_global_dp: Mapping[str, object] = field(default_factory=dict)
     flat_ownership_enabled: bool = True
     flat_ownership_overlap_fraction: float = 0.10
     flat_ownership_edge_fraction: float = 0.60
@@ -255,6 +257,12 @@ class WRTIConfig:
         ):
             if isinstance(value, bool) or int(value) != value or value < (0 if name == "max_candidates_per_trace" else 1):
                 raise WorkflowConfigError(f"bootstrap_tracking.{name} must be a non-negative integer.")
+        if not isinstance(self.flat_global_dp, Mapping):
+            raise WorkflowConfigError("bootstrap_tracking.global_dp must be a mapping.")
+        global_dp = dict(self.flat_global_dp)
+        if "enabled" in global_dp and not isinstance(global_dp["enabled"], (bool, np.bool_)):
+            raise WorkflowConfigError("bootstrap_tracking.global_dp.enabled must be boolean.")
+        object.__setattr__(self, "flat_global_dp", global_dp)
         if (not isinstance(self.flat_hard_neighbor_zncc_gate, (bool, np.bool_))
                 or not isinstance(self.flat_ownership_enabled, (bool, np.bool_))
                 or not isinstance(self.flat_seed_snap_enabled, (bool, np.bool_))
@@ -484,6 +492,7 @@ class WRTIConfig:
             flat_prediction_penalty_weight=bootstrap_tracking.get("prediction_penalty_weight", 0.20),
             flat_max_prediction_error_time=bootstrap_tracking.get("max_prediction_error_time", 0.050),
             flat_max_active_states=bootstrap_tracking.get("max_active_states", 2000),
+            flat_global_dp=bootstrap_tracking.get("global_dp", {}),
             flat_ownership_enabled=bootstrap_tracking.get("ownership_enabled", True),
             flat_ownership_overlap_fraction=bootstrap_tracking.get("ownership_overlap_fraction", 0.10),
             flat_ownership_edge_fraction=bootstrap_tracking.get("ownership_edge_fraction", 0.60),
