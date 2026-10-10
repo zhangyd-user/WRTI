@@ -76,39 +76,85 @@ def test_control_divergence_detects_diffraction_flank_without_apex():
     assert seed_search._control_divergence_risk(pilot, 0, 2.40)
 
 
-def test_short_seed_rank_prefers_whole_pilot_control_consistency():
-    bad = _short_evaluation(_pilot_result(
-        [2.40] * 7,
-        median_zncc=0.95,
-        median_abs_control_error=0.045,
-        p90_abs_control_error=0.100,
-        median_abs_flatness_error=0.030,
-        p90_abs_flatness_error=0.080,
-    ))
-    good = _short_evaluation(_pilot_result(
-        [2.405] * 7,
+def test_seed_rank_control_class_beats_stronger_lower_diffraction():
+    correct = _short_evaluation(_pilot_result(
+        [2.420] * 7,
         median_zncc=0.85,
-        median_abs_control_error=0.006,
-        p90_abs_control_error=0.012,
-        median_abs_flatness_error=0.002,
-        p90_abs_flatness_error=0.004,
-    ), seed_time=2.405)
+        median_signed_control_residual=0.020,
+        robust_linear_slope_ms_per_100m=1.0,
+        p90_abs_flatness_error=0.002,
+    ))
+    diffraction = _short_evaluation(_pilot_result(
+        [2.455] * 7,
+        median_zncc=0.99,
+        median_signed_control_residual=0.055,
+        robust_linear_slope_ms_per_100m=0.5,
+        p90_abs_flatness_error=0.001,
+    ), seed_time=2.455)
     rank_options = dict(
         base_seed=3,
         control_time=2.40,
         slope_quantum=1.0,
         time_quantum=0.001,
     )
-    assert seed_search._short_seed_rank(good, **rank_options) > seed_search._short_seed_rank(
-        bad, **rank_options
+    assert seed_search._control_class(correct.pilot) == 3
+    assert seed_search._control_class(diffraction.pilot) == 1
+    assert seed_search._short_seed_rank(
+        correct, **rank_options
+    ) > seed_search._short_seed_rank(
+        diffraction, **rank_options
     )
 
 
-def test_production_seed_avoids_rough_anchor_middle():
-    pilot = _pilot_result([2.400, 2.401, 2.402, 2.430, 2.403, 2.402, 2.401])
+def test_same_control_class_prefers_stable_event_over_exact_distance():
+    closer = _short_evaluation(_pilot_result(
+        [2.405] * 7,
+        median_signed_control_residual=0.005,
+        robust_linear_slope_ms_per_100m=8.0,
+        p90_abs_flatness_error=0.002,
+    ))
+    stable = _short_evaluation(_pilot_result(
+        [2.420] * 7,
+        median_signed_control_residual=0.020,
+        robust_linear_slope_ms_per_100m=1.0,
+        p90_abs_flatness_error=0.002,
+    ))
+    options = dict(
+        base_seed=3, control_time=2.4, slope_quantum=1.0, time_quantum=0.001
+    )
+    assert seed_search._control_class(closer.pilot) == 3
+    assert seed_search._control_class(stable.pilot) == 3
+    assert seed_search._short_seed_rank(
+        stable, **options
+    ) > seed_search._short_seed_rank(closer, **options)
+
+
+def test_same_quality_and_control_class_prefers_earlier_event():
+    earlier = _short_evaluation(_pilot_result(
+        [2.385] * 7,
+        median_signed_control_residual=-0.015,
+        robust_linear_slope_ms_per_100m=1.0,
+        p90_abs_flatness_error=0.002,
+    ))
+    later = _short_evaluation(_pilot_result(
+        [2.415] * 7,
+        median_signed_control_residual=0.015,
+        robust_linear_slope_ms_per_100m=1.0,
+        p90_abs_flatness_error=0.002,
+    ))
+    options = dict(
+        base_seed=3, control_time=2.4, slope_quantum=1.0, time_quantum=0.001
+    )
+    assert seed_search._short_seed_rank(
+        earlier, **options
+    ) > seed_search._short_seed_rank(later, **options)
+
+
+def test_production_seed_avoids_control_crossing_corner():
+    pilot = _pilot_result([3.060, 3.061, 3.062, 3.090, 3.063, 3.064, 3.065])
     item = _short_evaluation(pilot)
     receiver, _, _ = seed_search._production_seed_from_short(
-        item, control_time=2.400
+        item, control_time=3.090
     )
     assert receiver != 3
 

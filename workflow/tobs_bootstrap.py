@@ -8,12 +8,13 @@ For each reflector/shot pair it
 
 1. chooses the zero/nearest-offset receiver as the control receiver,
 2. removes only the *relative* Eikonal moveout from the whole observed gather,
-3. uses the supplied same-x time only as a theoretical reflector anchor,
+3. uses the nearest-offset Eikonal time as the theoretical reflector anchor,
 4. discovers a pilot-validated positive observed peak and fixed anchor segment,
 5. extends that anchor with the sparse DP and restores the removed moveout.
 
-The supplied absolute time is a search prior, not a forced observed pick.
-All Eikonal times are used only through their relative moveout.
+The supplied same-x time remains an API input for upstream diagnostics, but
+the production anchor and ownership corridors use the nearest-offset Eikonal
+time.
 """
 
 from __future__ import annotations
@@ -858,10 +859,11 @@ def build_observed_centers_from_eikonal(
 
     ``theoretical_traveltime`` must be the Eikonal reflection time calculated
     with the *same migration velocity and reflector pair* used to create the
-    initial migrated reflector. ``control_time`` is an already shifted
-    ``[nref, nshot]`` theoretical search anchor; the observed positive peak is
-    discovered from the flattened data and may differ from it. No reference
-    synthetic waveform is accepted by this API.
+    initial migrated reflector. ``control_time`` remains a required
+    ``[nref, nshot]`` diagnostic input, while production tracking uses the
+    nearest-offset Eikonal time as its control. The observed positive peak may
+    differ from that control. No reference synthetic waveform is accepted by
+    this API.
     """
 
     observed = np.asarray(observed_data, dtype=float)
@@ -1048,10 +1050,11 @@ def build_observed_centers_from_eikonal(
     for shot in range(nshot):
         i0 = nearest_offset_receiver(sources[shot], receivers[shot])
         control_receiver[shot] = i0
+        effective_control_time = tref[:, shot, i0]
         moveouts = tref[:, shot] - tref[:, shot, i0, None]
-        predicted_center[:, shot] = supplied_control_time[:, shot, None] + moveouts
+        predicted_center[:, shot] = effective_control_time[:, None] + moveouts
         upper, lower, violation = _ownership_corridors(
-            predicted_center[:, shot], supplied_control_time[:, shot],
+            predicted_center[:, shot], effective_control_time,
             float(ownership_overlap_fraction), float(ownership_edge_fraction),
         )
         ownership_upper_time[:, shot] = upper
@@ -1063,7 +1066,7 @@ def build_observed_centers_from_eikonal(
             row = tref[reflector, shot]
             if not np.isfinite(row[i0]):
                 continue
-            seed_time = float(supplied_control_time[reflector, shot])
+            seed_time = float(effective_control_time[reflector])
             if not np.isfinite(seed_time):
                 continue
             used_control_time[reflector, shot] = seed_time

@@ -53,6 +53,8 @@ class SeedPilotResult:
     p90_abs_control_error: float = np.nan
     median_abs_flatness_error: float = np.nan
     p90_abs_flatness_error: float = np.nan
+    median_signed_control_residual: float = np.nan
+    robust_linear_slope_ms_per_100m: float = np.nan
 
 
 @dataclass(frozen=True)
@@ -549,20 +551,42 @@ def _pilot(
     median_prediction = float(np.median(prediction)) if prediction.size else np.inf
     median_slope = float(np.median(slopes)) if slopes.size else np.inf
     p90_slope = float(np.percentile(slopes, 90.0)) if slopes.size else np.inf
-    used_times = np.asarray(tracked.pick_time[used_local], dtype=float)
-    used_times = used_times[np.isfinite(used_times)]
+    used_local_finite = np.asarray(used_local, dtype=int)
+    if used_local_finite.size:
+        finite = np.isfinite(tracked.pick_time[used_local_finite])
+        used_local_finite = used_local_finite[finite]
+    used_times = np.asarray(tracked.pick_time[used_local_finite], dtype=float)
     median_abs_control_error = np.nan
     p90_abs_control_error = np.nan
     median_abs_flatness_error = np.nan
     p90_abs_flatness_error = np.nan
+    median_signed_control_residual = np.nan
+    robust_linear_slope_ms_per_100m = np.nan
     if used_times.size:
-        flatness_error = np.abs(used_times - float(np.median(used_times)))
+        pilot_center = float(np.median(used_times))
+        flatness_error = np.abs(used_times - pilot_center)
         median_abs_flatness_error = float(np.median(flatness_error))
         p90_abs_flatness_error = float(np.percentile(flatness_error, 90.0))
         if control_time is not None and np.isfinite(float(control_time)):
-            control_error = np.abs(used_times - float(control_time))
+            signed_control_residual = used_times - float(control_time)
+            control_error = np.abs(signed_control_residual)
             median_abs_control_error = float(np.median(control_error))
             p90_abs_control_error = float(np.percentile(control_error, 90.0))
+            median_signed_control_residual = float(
+                np.median(signed_control_residual)
+            )
+    if used_local_finite.size >= 2:
+        global_receivers = np.asarray(subset[used_local_finite], dtype=int)
+        xx = np.asarray(x[global_receivers], dtype=float)
+        tt = np.asarray(tracked.pick_time[used_local_finite], dtype=float)
+        order = np.argsort(xx, kind="stable")
+        dx = np.diff(xx[order])
+        dtime = np.diff(tt[order])
+        good = np.isfinite(dx) & np.isfinite(dtime) & (dx != 0.0)
+        if np.any(good):
+            robust_linear_slope_ms_per_100m = float(
+                np.median(dtime[good] / dx[good]) * 1.0e5
+            )
     passed = (
         bool(side_ok)
         and coverage >= float(min_coverage)
@@ -597,6 +621,8 @@ def _pilot(
         p90_abs_control_error=p90_abs_control_error,
         median_abs_flatness_error=median_abs_flatness_error,
         p90_abs_flatness_error=p90_abs_flatness_error,
+        median_signed_control_residual=median_signed_control_residual,
+        robust_linear_slope_ms_per_100m=robust_linear_slope_ms_per_100m,
     )
 
 
@@ -1158,8 +1184,8 @@ def _production_seed_from_short(item: _ShortSeedEvaluation, *, control_time=None
         t1 = float(item.pilot.pick_time[receiver])
         t2 = float(item.pilot.pick_time[next_receiver])
         roughness = abs(t0 - 2.0 * t1 + t2)
-        control_error = (
-            abs(t1 - float(control_time))
+        late_control_penalty = (
+            max(0.0, t1 - float(control_time))
             if control_time is not None and np.isfinite(float(control_time))
             else 0.0
         )
@@ -1172,7 +1198,7 @@ def _production_seed_from_short(item: _ShortSeedEvaluation, *, control_time=None
             rho = rho_default
         return (
             roughness,
-            control_error,
+            _quantize(late_control_penalty, 0.005),
             prediction_error,
             -rho,
             abs(receiver - geometric_center),
@@ -1184,20 +1210,43 @@ def _production_seed_from_short(item: _ShortSeedEvaluation, *, control_time=None
     return receiver, sample, time
 
 
+def _control_class(pilot):
+    """Classify whole-pilot proximity to the reflector-level control prior."""
+    residual = float(pilot.median_signed_control_residual)
+    if not np.isfinite(residual):
+        return 0
+    residual = abs(residual)
+    if residual <= 0.025:
+        return 3
+    if residual <= 0.050:
+        return 2
+    if residual <= 0.080:
+        return 1
+    return 0
+
+
 def _pilot_geometry_rank(pilot, *, mode, time_quantum):
-    """Prefer a complete flat/control-consistent pilot over a local crossing."""
-    median_control = _quantize(pilot.median_abs_control_error, time_quantum)
-    p90_control = _quantize(pilot.p90_abs_control_error, time_quantum)
-    median_flatness = _quantize(pilot.median_abs_flatness_error, time_quantum)
-    p90_flatness = _quantize(pilot.p90_abs_flatness_error, time_quantum)
-    if mode == "LOCAL":
-        return -p90_control, -median_control, -p90_flatness, -median_flatness
-    return -p90_flatness, -median_flatness, -median_control, -p90_control
+    """Rank reflector level first, then whole observed-event stability."""
+    _ = mode
+    drift = abs(float(pilot.robust_linear_slope_ms_per_100m))
+    if not np.isfinite(drift):
+        drift = np.inf
+    return (
+        _control_class(pilot),
+        -drift,
+        -_quantize(pilot.p90_abs_flatness_error, time_quantum),
+    )
 
 
 def _short_seed_rank(item, *, base_seed, control_time, slope_quantum, time_quantum):
     hypothesis = item.hypothesis
     pilot = item.pilot
+    _ = slope_quantum
+    _ = control_time
+    signed_residual = float(pilot.median_signed_control_residual)
+    earlier_event_tiebreak = (
+        -signed_residual if np.isfinite(signed_residual) else -np.inf
+    )
     return (
         *_pilot_geometry_rank(
             pilot, mode=item.mode, time_quantum=time_quantum
@@ -1205,9 +1254,9 @@ def _short_seed_rank(item, *, base_seed, control_time, slope_quantum, time_quant
         -int(bool(item.control_divergence_risk)),
         pilot.coverage,
         pilot.median_zncc,
-        -_quantize(pilot.p90_abs_slope_ms_per_100m, slope_quantum),
-        -pilot.median_abs_prediction_error,
-        -_quantize(abs(hypothesis[0] - float(control_time)), time_quantum),
+        -_quantize(pilot.p90_abs_slope_ms_per_100m, 1.0),
+        -_quantize(pilot.median_abs_prediction_error, time_quantum),
+        earlier_event_tiebreak,
         hypothesis[3],
         hypothesis[4],
         int(item.anchor_left + item.anchor_right + 1),
@@ -1742,6 +1791,10 @@ def discover_tracking_seed(
             if long is None:
                 continue
             transitions += long.transition_count
+            signed_residual = float(long.median_signed_control_residual)
+            earlier_event_tiebreak = (
+                -signed_residual if np.isfinite(signed_residual) else -np.inf
+            )
             rank = (
                 *_pilot_geometry_rank(
                     long,
@@ -1755,11 +1808,8 @@ def discover_tracking_seed(
                 -_quantize(
                     long.p90_abs_slope_ms_per_100m, slope_quantum
                 ),
-                -long.median_abs_prediction_error,
-                -_quantize(
-                    abs(member.hypothesis[0] - float(control_time)),
-                    time_quantum,
-                ),
+                -_quantize(long.median_abs_prediction_error, time_quantum),
+                earlier_event_tiebreak,
                 member.hypothesis[3],
                 member.hypothesis[4],
                 int(member.anchor_left + member.anchor_right + 1),

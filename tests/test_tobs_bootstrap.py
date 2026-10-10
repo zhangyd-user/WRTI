@@ -196,7 +196,7 @@ def test_bootstrap_recovers_observed_center_after_eikonal_flattening():
     seed = 4
     moveout = 0.003 * (np.arange(9) - seed) ** 2
     tref = (0.60 + moveout)[None, None, :]
-    expected = tref[0, 0] + 0.10
+    expected = tref[0, 0]
     observed = np.stack([_pulse(time, center) for center in expected])[None, :, :]
     sources = np.array([[receiver_x[seed], 0.0]])
     receivers = np.zeros((1, 9, 2), dtype=float)
@@ -248,21 +248,22 @@ def test_same_x_time_starts_at_nonzero_source_depth():
     assert time == 2.0 * 30.0 / 2000.0
 
 
-def test_bootstrap_uses_supplied_seed_but_keeps_eikonal_moveout():
+def test_bootstrap_uses_nearest_receiver_eikonal_control_and_moveout():
     dt = 0.002
     time = np.arange(500) * dt
     tref_row = np.array([0.54, 0.51, 0.50, 0.51, 0.54])
     moveout = tref_row - tref_row[2]
-    seed_time = 0.68
-    expected = seed_time + moveout
+    supplied_same_x_time = 0.68
+    expected = tref_row
     observed = np.stack([_pulse(time, center) for center in expected])[None]
     receivers = np.zeros((1, 5, 2))
     receivers[0, :, 0] = np.arange(5) * 10.0
     result = build_observed_centers_from_eikonal(
         observed, tref_row[None, None], np.array([[20.0, 0.0]]), receivers,
-        control_time=np.array([[seed_time]]), dt=dt, epsilon_time=0.004,
+        control_time=np.array([[supplied_same_x_time]]), dt=dt, epsilon_time=0.004,
     )
-    assert result.control_time[0, 0] == seed_time
+    assert result.control_time[0, 0] == tref_row[2]
+    np.testing.assert_allclose(result.predicted_center[0, 0], tref_row)
     np.testing.assert_allclose(result.observed_center[0, 0], expected, atol=dt)
 
 
